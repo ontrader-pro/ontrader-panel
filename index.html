@@ -1,77 +1,129 @@
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Índice OnTrader</title>
   <style>
-    body {
-      background-color: #101729;
-      color: #ffffff;
-      font-family: sans-serif;
-      margin: 0;
-      padding: 20px;
-    }
-    h1 {
-      color: #25f0ff;
-      text-align: center;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 20px;
-      background-color: #0e1325;
-    }
-    th, td {
-      border: 1px solid #333;
-      padding: 8px;
-      text-align: center;
-    }
-    thead {
-      background-color: #1f2a44;
-      color: #25f0ff;
-    }
-    .high { color: limegreen; font-weight: bold; }
-    .mid { color: orange; font-weight: bold; }
-    .low { color: red; font-weight: bold; }
+    body { background-color: #101729; color: #fff; font-family: sans-serif; margin:0; padding:10px; }
+    h1 { color:#25f0ff; text-align:center; }
+    #filtros { display:flex; flex-wrap:wrap; justify-content:center; gap:10px; margin:10px 0; }
+    input, select { padding:6px; border-radius:4px; border:none; font-size:14px; }
+    table { width:100%; border-collapse:collapse; margin:10px 0; overflow-x:auto; display:block; }
+    th, td { border:1px solid #333; padding:6px; text-align:center; min-width:80px; }
+    thead { background-color:#1f2a44; color:#25f0ff; }
+    .high { color:limegreen; font-weight:bold; }
+    .mid  { color:orange;    font-weight:bold; }
+    .low  { color:red;       font-weight:bold; }
+    #alerta { position:fixed; bottom:20px; right:20px; background:#ff4444; color:#fff;
+              padding:10px 15px; border-radius:5px; display:none; box-shadow:0 0 6px rgba(0,0,0,0.5); }
   </style>
 </head>
 <body>
   <h1>Índice OnTrader</h1>
-  <div id="ontrader-panel">Cargando datos...</div>
+  <div id="filtros">
+    <input type="text" id="buscar" placeholder="Buscar...">
+    <select id="orden">
+      <option value="desc">Mayor Índice</option>
+      <option value="asc">Menor Índice</option>
+    </select>
+  </div>
+  <div id="panel">Cargando...</div>
+  <div id="alerta"></div>
 
   <script>
-    fetch("https://script.google.com/macros/s/AKfycbwXmxJfHuMqVf9isEs1j-DImm4rfiuY1UW-S5BXBoi4nBbcSabaE1mrBFldN3oYw_cC/exec")
-      .then(res => res.json())
-      .then(data => {
-        let html = `<table>
-          <thead>
-            <tr>
-              <th>Criptomoneda</th>
-              <th>Precio</th>
-              <th>Índice OnTrader</th>
-              <th>Alerta Técnica</th>
-            </tr>
-          </thead><tbody>`;
+    // Lista de 20 ejemplos; expándala a 100 símbolos
+    const pares = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT",
+                   "DOGEUSDT","AVAXUSDT","DOTUSDT","LINKUSDT","MATICUSDT","LTCUSDT",
+                   "TRXUSDT","SHIBUSDT","UNIUSDT","EOSUSDT","ATOMUSDT","XMRUSDT",
+                   "ETCUSDT","FILUSDT"];  
+    // Valores D1 domingo (ejemplo; ajuste según datos reales)
+    const domingo = {};
+    pares.forEach(p=> domingo[p] = { max:0, min:0 }); // Rellene manualmente los valores
 
-        data.forEach(row => {
-          const indice = parseFloat(row.indice);
-          const colorClass = indice >= 8 ? "high" : indice >= 5 ? "mid" : "low";
-          html += `<tr>
-            <td>${row.cripto}</td>
-            <td>${row.precio}</td>
-            <td class="${colorClass}">${indice} / 10</td>
-            <td>${row.alerta || '-'}</td>
-          </tr>`;
-        });
+    let dataGlobal = [], alertShown = new Set();
 
-        html += `</tbody></table>`;
-        document.getElementById("ontrader-panel").innerHTML = html;
-      })
-      .catch(error => {
-        document.getElementById("ontrader-panel").innerText = "No se pudo cargar el índice.";
-        console.error(error);
-      });
+    async function fetchAll(url) {
+      return fetch('https://api.allorigins.win/raw?url='+encodeURIComponent(url))
+        .then(r=>r.json());
+    }
+
+    async function obtenerDatos() {
+      const resultados = [];
+      for (let par of pares) {
+        try {
+          // precio
+          let precioData = await fetchAll(`https://api.binance.com/api/v3/ticker/price?symbol=${par}`);
+          const precio = parseFloat(precioData.price);
+          // klines para EMA y RSI (últimas 15 cierres 1h)
+          let klines = await fetchAll(`https://api.binance.com/api/v3/klines?symbol=${par}&interval=1h&limit=15`);
+          const cierres = klines.map(k=>parseFloat(k[4]));
+          const ema = calcularEMA(cierres,14);
+          const rsi = calcularRSI(cierres);
+          // índices
+          const maxDom = domingo[par].max, minDom = domingo[par].min;
+          let score=0;
+          if(precio>minDom) score+=1;
+          if(precio>(minDom+maxDom)/2) score+=2;
+          if(precio>maxDom) score+=2;
+          if(precio<minDom) score+=2;
+          if((precio%1)<0.2) score+=1;
+          if(precio>ema) score+=2;
+          if(rsi>60||rsi<40) score+=2.5;
+          score=Math.min(10,Math.max(1,score));
+          let alerta = score>=7? `🚨 ${par.replace('USDT','')} Índice ${score}` : '-';
+          resultados.push({cripto:par.replace('USDT',''), precio, indice:score, alerta});
+        } catch(e){}
+      }
+      dataGlobal=resultados;
+      renderTabla(dataGlobal);
+      mostrarAlerta(dataGlobal);
+    }
+
+    function calcularEMA(vals,p) {
+      const k=2/(p+1);
+      return vals.reduce((a,v,i)=>i? v*k + a*(1-k) : v,0);
+    }
+
+    function calcularRSI(closes) {
+      let gains=0, losses=0;
+      for(let i=1;i<closes.length;i++){
+        let d=closes[i]-closes[i-1];
+        if(d>0) gains+=d; else losses-=d;
+      }
+      let avgG=gains/(closes.length-1), avgL=losses/(closes.length-1);
+      let rs = avgG/(avgL||1);
+      return 100-(100/(1+rs));
+    }
+
+    function renderTabla(data){
+      const orden = document.getElementById('orden').value;
+      const busq = document.getElementById('buscar').value.toLowerCase();
+      let fil = data.filter(d=>d.cripto.toLowerCase().includes(busq));
+      fil.sort((a,b)=> orden==='desc'?b.indice-a.indice:a.indice-b.indice);
+      let html = `<table><thead><tr><th>Cripto</th><th>Precio</th><th>Índice</th><th>Alerta</th></tr></thead><tbody>`;
+      fil.slice(0,100).forEach(d=> html+=`<tr><td>${d.cripto}</td><td>${d.precio}</td><td class="${d.indice>=8?'high':d.indice>=5?'mid':'low'}">${d.indice}</td><td>${d.alerta}</td></tr>`);
+      html+=`</tbody></table>`;
+      document.getElementById('panel').innerHTML=html;
+    }
+
+    function mostrarAlerta(data){
+      const panel = document.getElementById('alerta');
+      let found = data.find(d=>d.indice>=7 && !alertShown.has(d.cripto));
+      if(found){
+        alertShown.add(found.cripto);
+        panel.innerText = found.alerta;
+        panel.style.display='block';
+        new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play();
+        setTimeout(()=>panel.style.display='none',10000);
+      }
+    }
+
+    document.getElementById('buscar').addEventListener('input',()=>renderTabla(dataGlobal));
+    document.getElementById('orden').addEventListener('change',()=>renderTabla(dataGlobal));
+
+    obtenerDatos();
+    setInterval(obtenerDatos,30000);
   </script>
 </body>
 </html>
