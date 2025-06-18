@@ -1,129 +1,134 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Índice OnTrader</title>
-  <style>
-    body { background-color: #101729; color: #fff; font-family: sans-serif; margin:0; padding:10px; }
-    h1 { color:#25f0ff; text-align:center; }
-    #filtros { display:flex; flex-wrap:wrap; justify-content:center; gap:10px; margin:10px 0; }
-    input, select { padding:6px; border-radius:4px; border:none; font-size:14px; }
-    table { width:100%; border-collapse:collapse; margin:10px 0; overflow-x:auto; display:block; }
-    th, td { border:1px solid #333; padding:6px; text-align:center; min-width:80px; }
-    thead { background-color:#1f2a44; color:#25f0ff; }
-    .high { color:limegreen; font-weight:bold; }
-    .mid  { color:orange;    font-weight:bold; }
-    .low  { color:red;       font-weight:bold; }
-    #alerta { position:fixed; bottom:20px; right:20px; background:#ff4444; color:#fff;
-              padding:10px 15px; border-radius:5px; display:none; box-shadow:0 0 6px rgba(0,0,0,0.5); }
-  </style>
-</head>
-<body>
-  <h1>Índice OnTrader</h1>
-  <div id="filtros">
-    <input type="text" id="buscar" placeholder="Buscar...">
-    <select id="orden">
-      <option value="desc">Mayor Índice</option>
-      <option value="asc">Menor Índice</option>
-    </select>
-  </div>
-  <div id="panel">Cargando...</div>
-  <div id="alerta"></div>
+<script>
+  // 1) Define aquí las criptos (CoinGecko IDs) y sus símbolos
+  const cgIDs = ["bitcoin","ethereum","binancecoin","solana","ripple"];
+  const symbolMap = {
+    bitcoin: "BTC",
+    ethereum: "ETH",
+    binancecoin: "BNB",
+    solana: "SOL",
+    ripple: "XRP"
+  };
+  // 2) Domingo max/min (ajusta si quieres)
+  const domingo = {
+    BTC: { max: 67000, min: 65000 },
+    ETH: { max: 3500,  min: 3420  },
+    BNB: { max: 450,   min: 430   },
+    SOL: { max: 150,   min: 142   },
+    XRP: { max: 0.55,  min: 0.51  }
+  };
 
-  <script>
-    // Lista de 20 ejemplos; expándala a 100 símbolos
-    const pares = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT",
-                   "DOGEUSDT","AVAXUSDT","DOTUSDT","LINKUSDT","MATICUSDT","LTCUSDT",
-                   "TRXUSDT","SHIBUSDT","UNIUSDT","EOSUSDT","ATOMUSDT","XMRUSDT",
-                   "ETCUSDT","FILUSDT"];  
-    // Valores D1 domingo (ejemplo; ajuste según datos reales)
-    const domingo = {};
-    pares.forEach(p=> domingo[p] = { max:0, min:0 }); // Rellene manualmente los valores
+  let dataGlobal = [], alerted = new Set();
 
-    let dataGlobal = [], alertShown = new Set();
+  async function actualizar() {
+    // 3) Fetch precios actuales
+    const priceRes = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${cgIDs.join(",")}&vs_currencies=usd`
+    );
+    const prices = await priceRes.json();
 
-    async function fetchAll(url) {
-      return fetch('https://api.allorigins.win/raw?url='+encodeURIComponent(url))
-        .then(r=>r.json());
-    }
+    // 4) Fetch datos OHLC para EMA/RSI
+    const resultados = [];
+    for (let id of cgIDs) {
+      try {
+        // market_chart para 1 día (granularidad ~5 min)
+        const chartRes = await fetch(
+          `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=1`
+        );
+        const chart = await chartRes.json();
+        // extraemos solo los precios de cierre
+        const closes = chart.prices.map(p => p[1]);
+        // tomamos las últimas 15 para RSI y las últimas 28 para EMA
+        const last15 = closes.slice(-15);
+        const last28 = closes.slice(-28);
 
-    async function obtenerDatos() {
-      const resultados = [];
-      for (let par of pares) {
-        try {
-          // precio
-          let precioData = await fetchAll(`https://api.binance.com/api/v3/ticker/price?symbol=${par}`);
-          const precio = parseFloat(precioData.price);
-          // klines para EMA y RSI (últimas 15 cierres 1h)
-          let klines = await fetchAll(`https://api.binance.com/api/v3/klines?symbol=${par}&interval=1h&limit=15`);
-          const cierres = klines.map(k=>parseFloat(k[4]));
-          const ema = calcularEMA(cierres,14);
-          const rsi = calcularRSI(cierres);
-          // índices
-          const maxDom = domingo[par].max, minDom = domingo[par].min;
-          let score=0;
-          if(precio>minDom) score+=1;
-          if(precio>(minDom+maxDom)/2) score+=2;
-          if(precio>maxDom) score+=2;
-          if(precio<minDom) score+=2;
-          if((precio%1)<0.2) score+=1;
-          if(precio>ema) score+=2;
-          if(rsi>60||rsi<40) score+=2.5;
-          score=Math.min(10,Math.max(1,score));
-          let alerta = score>=7? `🚨 ${par.replace('USDT','')} Índice ${score}` : '-';
-          resultados.push({cripto:par.replace('USDT',''), precio, indice:score, alerta});
-        } catch(e){}
-      }
-      dataGlobal=resultados;
-      renderTabla(dataGlobal);
-      mostrarAlerta(dataGlobal);
-    }
+        const precio = prices[id].usd;
+        const ema   = calcEMA(last28, 28);
+        const rsi   = calcRSI(last15);
 
-    function calcularEMA(vals,p) {
-      const k=2/(p+1);
-      return vals.reduce((a,v,i)=>i? v*k + a*(1-k) : v,0);
-    }
+        const sym = symbolMap[id];
+        const { max, min } = domingo[sym] || {};
+        let score = 0;
+        if (precio > min) score += 1;
+        if (precio > (min + max) / 2) score += 2;
+        if (precio > max) score += 2;
+        if (precio < min) score += 2;
+        if ((precio % 1) < 0.2) score += 1;
+        if (precio > ema) score += 2;
+        if (rsi > 60 || rsi < 40) score += 2.5;
+        score = Math.min(10, Math.max(1, score));
 
-    function calcularRSI(closes) {
-      let gains=0, losses=0;
-      for(let i=1;i<closes.length;i++){
-        let d=closes[i]-closes[i-1];
-        if(d>0) gains+=d; else losses-=d;
-      }
-      let avgG=gains/(closes.length-1), avgL=losses/(closes.length-1);
-      let rs = avgG/(avgL||1);
-      return 100-(100/(1+rs));
-    }
+        const alerta = score >= 7
+          ? `🚨 ${sym} Índice ${score}`
+          : "-";
 
-    function renderTabla(data){
-      const orden = document.getElementById('orden').value;
-      const busq = document.getElementById('buscar').value.toLowerCase();
-      let fil = data.filter(d=>d.cripto.toLowerCase().includes(busq));
-      fil.sort((a,b)=> orden==='desc'?b.indice-a.indice:a.indice-b.indice);
-      let html = `<table><thead><tr><th>Cripto</th><th>Precio</th><th>Índice</th><th>Alerta</th></tr></thead><tbody>`;
-      fil.slice(0,100).forEach(d=> html+=`<tr><td>${d.cripto}</td><td>${d.precio}</td><td class="${d.indice>=8?'high':d.indice>=5?'mid':'low'}">${d.indice}</td><td>${d.alerta}</td></tr>`);
-      html+=`</tbody></table>`;
-      document.getElementById('panel').innerHTML=html;
-    }
-
-    function mostrarAlerta(data){
-      const panel = document.getElementById('alerta');
-      let found = data.find(d=>d.indice>=7 && !alertShown.has(d.cripto));
-      if(found){
-        alertShown.add(found.cripto);
-        panel.innerText = found.alerta;
-        panel.style.display='block';
-        new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play();
-        setTimeout(()=>panel.style.display='none',10000);
+        resultados.push({ cripto: sym, precio, indice: score, alerta });
+      } catch(e) {
+        console.warn("Error con", id, e);
       }
     }
 
-    document.getElementById('buscar').addEventListener('input',()=>renderTabla(dataGlobal));
-    document.getElementById('orden').addEventListener('change',()=>renderTabla(dataGlobal));
+    dataGlobal = resultados;
+    renderTabla();
+    mostrarAlerta();
+  }
 
-    obtenerDatos();
-    setInterval(obtenerDatos,30000);
-  </script>
-</body>
-</html>
+  function calcEMA(vals, period) {
+    const k = 2/(period + 1);
+    return vals.reduce((acc, v, i) => i
+      ? v * k + acc * (1 - k)
+      : v
+    );
+  }
+
+  function calcRSI(arr) {
+    let gains = 0, losses = 0;
+    for (let i = 1; i < arr.length; i++) {
+      const d = arr[i] - arr[i-1];
+      if (d > 0) gains += d;
+      else losses -= d;
+    }
+    const avgG = gains/(arr.length - 1);
+    const avgL = losses/(arr.length - 1) || 1e-6;
+    const rs   = avgG/avgL;
+    return 100 - (100/(1+rs));
+  }
+
+  function renderTabla() {
+    const ord = document.getElementById("orden").value;
+    const bus = document.getElementById("buscar").value.toLowerCase();
+    let arr = dataGlobal.filter(d => d.cripto.toLowerCase().includes(bus));
+    arr.sort((a,b) => ord === "desc" ? b.indice - a.indice : a.indice - b.indice);
+
+    let html = "<table><thead><tr><th>Cripto</th><th>Precio</th><th>Índice</th><th>Alerta</th></tr></thead><tbody>";
+    for (let d of arr) {
+      const cls = d.indice >= 8 ? "high" : d.indice >= 5 ? "mid" : "low";
+      html += `<tr>
+        <td>${d.cripto}</td>
+        <td>${d.precio.toLocaleString()}</td>
+        <td class="${cls}">${d.indice}</td>
+        <td>${d.alerta}</td>
+      </tr>`;
+    }
+    html += "</tbody></table>";
+    document.getElementById("panel").innerHTML = html;
+  }
+
+  function mostrarAlerta() {
+    const el = document.getElementById("alerta");
+    const n = dataGlobal.find(d => d.indice >= 7 && !alerted.has(d.cripto));
+    if (n) {
+      alerted.add(n.cripto);
+      el.innerText = n.alerta;
+      el.style.display = "block";
+      new Audio("https://actions.google.com/sounds/v1/alarms/beep_short.ogg").play();
+      setTimeout(() => el.style.display = "none", 10000);
+    }
+  }
+
+  document.getElementById("buscar").addEventListener("input", renderTabla);
+  document.getElementById("orden").addEventListener("change", renderTabla);
+
+  // Arranca
+  actualizar();
+  setInterval(actualizar, 30000);
+</script>
