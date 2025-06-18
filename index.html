@@ -1,0 +1,77 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Índice OnTrader</title>
+  <style>
+    body {
+      background-color: #101729;
+      color: #ffffff;
+      font-family: sans-serif;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 {
+      color: #25f0ff;
+      text-align: center;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+      background-color: #0e1325;
+    }
+    th, td {
+      border: 1px solid #333;
+      padding: 8px;
+      text-align: center;
+    }
+    thead {
+      background-color: #1f2a44;
+      color: #25f0ff;
+    }
+    .high { color: limegreen; font-weight: bold; }
+    .mid { color: orange; font-weight: bold; }
+    .low { color: red; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Índice OnTrader</h1>
+  <div id="ontrader-panel">Cargando datos...</div>
+
+  <script>
+    fetch("https://script.google.com/macros/s/AKfycbwXmxJfHuMqVf9isEs1j-DImm4rfiuY1UW-S5BXBoi4nBbcSabaE1mrBFldN3oYw_cC/exec")
+      .then(res => res.json())
+      .then(data => {
+        let html = `<table>
+          <thead>
+            <tr>
+              <th>Criptomoneda</th>
+              <th>Precio</th>
+              <th>Índice OnTrader</th>
+              <th>Alerta Técnica</th>
+            </tr>
+          </thead><tbody>`;
+
+        data.forEach(row => {
+          const indice = parseFloat(row.indice);
+          const colorClass = indice >= 8 ? "high" : indice >= 5 ? "mid" : "low";
+          html += `<tr>
+            <td>${row.cripto}</td>
+            <td>${row.precio}</td>
+            <td class="${colorClass}">${indice} / 10</td>
+            <td>${row.alerta || '-'}</td>
+          </tr>`;
+        });
+
+        html += `</tbody></table>`;
+        document.getElementById("ontrader-panel").innerHTML = html;
+      })
+      .catch(error => {
+        document.getElementById("ontrader-panel").innerText = "No se pudo cargar el índice.";
+        console.error(error);
+      });
+  </script>
+</body>
+</html>
