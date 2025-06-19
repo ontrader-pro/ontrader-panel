@@ -47,7 +47,6 @@ const errorBox = document.getElementById('error-box');
 const alertBox = document.getElementById('alert-box');
 const sound = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
 let cache = [], prevScores = {}, alerts = [], prevData = {};
-let loadingStep = 0, loadingMax = 1;
 
 function showProgress(text) { progress.innerText = text; }
 function hideProgress() { progress.innerText = ""; }
@@ -136,20 +135,14 @@ function getSundayMinMax(closesArr, openTimeArr) {
 // NUEVA FÓRMULA DE SCORE
 function computeScoreV2(d) {
   let score = 1;
-  // 1) Precio > min Sunday: +3
   if (d.lastPrice > d.sundayMin) score += 3;
-  // 1b) Precio > max Sunday: +2 extra
   if (d.lastPrice > d.sundayMax) score += 2;
-  // 2) 15m: RSI>50 y Price>EMA28: +2 | RSI<50 y Price<EMA28: -2
   if (d.rsi15m > 50 && d.lastPrice > d.ema15m) score += 2;
   else if (d.rsi15m < 50 && d.lastPrice < d.ema15m) score -= 2;
-  // 3) 5m: RSI>70 y Price>EMA28: +1 | RSI<30 y Price<EMA28: -1
   if (d.rsi5m > 70 && d.lastPrice > d.ema5m) score += 1;
   else if (d.rsi5m < 30 && d.lastPrice < d.ema5m) score -= 1;
-  // 4) 4m: RSI<15: +0.5 | RSI>85: -0.5
   if (d.rsi4m < 15) score += 0.5;
   else if (d.rsi4m > 85) score -= 0.5;
-  // Clamp
   return Math.max(1, Math.min(10, score));
 }
 function phaseText(score) {
@@ -160,80 +153,88 @@ function phaseText(score) {
   else return '🟢 Overbought';
 }
 
-// MAIN: cargar datos y renderizar
-async function loadAndRender() {
+// CARGA POR LOTES ("BATCHES")
+async function loadAndRenderBatched() {
   try {
     showProgress("Iniciando…");
     clearError();
     alerts = [];
     let symbols = await getTop100Perpetuals();
-    loadingStep = 0; loadingMax = symbols.length;
+    let loadingStep = 0, loadingMax = symbols.length;
     let dataArr = [];
-    // Para score prev
     let scoreMapPrev = JSON.parse(localStorage.getItem('ontrader-score-prev')||"{}");
-    for (let symObj of symbols) {
-      loadingStep++;
-      showProgress(`Procesando ${symObj.symbol} (${loadingStep}/${loadingMax})`);
-      try {
-        // OHLCV para daily, 15m, 5m, 4m
-        let [ohlcvD, ohlcv15, ohlcv5, ohlcv4] = await Promise.all([
-          fetch(`${API_BASE}/fapi/v1/klines?symbol=${symObj.symbol}&interval=1d&limit=${CONFIG.minSundayLookback}`)
-            .then(r=>r.json()),
-          getOHLCV(symObj.symbol, '15m', 40),
-          getOHLCV(symObj.symbol, '5m', 40),
-          getOHLCV(symObj.symbol, '4m', 40)
-        ]);
-        let closesD = ohlcvD.map(x=>+x[4]);
-        let openTimesD = ohlcvD.map(x=>+x[0]);
-        let {min:sundayMin, max:sundayMax} = getSundayMinMax(closesD, openTimesD);
+    let BATCH_SIZE = 20;
 
-        let lastPrice = +ohlcv15[ohlcv15.length-1];
-        let ema15m = calcEMA(ohlcv15, 28);
-        let rsi15m = calcRSI(ohlcv15, 14);
-        let ema5m = calcEMA(ohlcv5, 28);
-        let rsi5m = calcRSI(ohlcv5, 14);
-        let rsi4m = calcRSI(ohlcv4, 14);
+    async function loadBatch(startIdx) {
+      let endIdx = Math.min(symbols.length, startIdx + BATCH_SIZE);
+      for (let i = startIdx; i < endIdx; i++) {
+        loadingStep++;
+        showProgress(`Procesando ${symbols[i].symbol} (${loadingStep}/${loadingMax})`);
+        try {
+          let [ohlcvD, ohlcv15, ohlcv5, ohlcv4] = await Promise.all([
+            fetch(`${API_BASE}/fapi/v1/klines?symbol=${symbols[i].symbol}&interval=1d&limit=${CONFIG.minSundayLookback}`)
+              .then(r=>r.json()),
+            getOHLCV(symbols[i].symbol, '15m', 40),
+            getOHLCV(symbols[i].symbol, '5m', 40),
+            getOHLCV(symbols[i].symbol, '4m', 40)
+          ]);
+          let closesD = ohlcvD.map(x=>+x[4]);
+          let openTimesD = ohlcvD.map(x=>+x[0]);
+          let {min:sundayMin, max:sundayMax} = getSundayMinMax(closesD, openTimesD);
 
-        let d = {
-          symbol: symObj.symbol,
-          lastPrice, sundayMin, sundayMax,
-          ema15m, rsi15m,
-          ema5m, rsi5m,
-          rsi4m
-        };
-        d.score = computeScoreV2(d);
-        d.phase = phaseText(d.score);
-        d.scorePrev = scoreMapPrev[d.symbol] || null;
+          let lastPrice = +ohlcv15[ohlcv15.length-1];
+          let ema15m = calcEMA(ohlcv15, 28);
+          let rsi15m = calcRSI(ohlcv15, 14);
+          let ema5m = calcEMA(ohlcv5, 28);
+          let rsi5m = calcRSI(ohlcv5, 14);
+          let rsi4m = calcRSI(ohlcv4, 14);
 
-        // Registrar alerta si hay cambio de fase/score
-        if (d.scorePrev !== null && d.score !== d.scorePrev) {
-          alerts.push({
-            time: Date.now(),
-            symbol: d.symbol,
-            phase: d.phase,
-            score: d.score,
-            scorePrev: d.scorePrev
-          });
-          showAlert(d.symbol, d.phase, d.score, d.scorePrev);
+          let d = {
+            symbol: symbols[i].symbol,
+            lastPrice, sundayMin, sundayMax,
+            ema15m, rsi15m,
+            ema5m, rsi5m,
+            rsi4m
+          };
+          d.score = computeScoreV2(d);
+          d.phase = phaseText(d.score);
+          d.scorePrev = scoreMapPrev[d.symbol] || null;
+
+          if (d.scorePrev !== null && d.score !== d.scorePrev) {
+            alerts.push({
+              time: Date.now(),
+              symbol: d.symbol,
+              phase: d.phase,
+              score: d.score,
+              scorePrev: d.scorePrev
+            });
+            showAlert(d.symbol, d.phase, d.score, d.scorePrev);
+          }
+          dataArr.push(d);
+          scoreMapPrev[d.symbol] = d.score;
+        } catch(e) {
+          log(`Error procesando ${symbols[i].symbol}:`, e);
         }
-        dataArr.push(d);
-        scoreMapPrev[d.symbol] = d.score;
-      } catch(e) {
-        log(`Error procesando ${symObj.symbol}:`, e);
+        if (i % 5 === 0) await sleep(300);
       }
-      // Evitar bloqueo por rate limit (pausa ligera cada 5)
-      if (loadingStep%5===0) await sleep(300);
+      cache = dataArr.slice();
+      localStorage.setItem('ontrader-score-prev', JSON.stringify(scoreMapPrev));
+      localStorage.setItem('ontrader-latest', JSON.stringify(dataArr));
+      renderTables();
+
+      if (endIdx < symbols.length) {
+        showProgress(`Cargando más (${endIdx}/${symbols.length})…`);
+        await sleep(500);
+        await loadBatch(endIdx);
+      } else {
+        hideProgress();
+      }
     }
-    // Guardar en localStorage para scorePrev y dataArr
-    localStorage.setItem('ontrader-score-prev', JSON.stringify(scoreMapPrev));
-    localStorage.setItem('ontrader-latest', JSON.stringify(dataArr));
-    cache = dataArr;
-    renderTables();
-    hideProgress();
+    await loadBatch(0);
+
   } catch(e) {
     showError("Error cargando datos: " + e.message);
     log(e);
-    // Intentar mostrar desde caché
     let backup = localStorage.getItem('ontrader-latest');
     if (backup) {
       cache = JSON.parse(backup);
@@ -244,12 +245,10 @@ async function loadAndRender() {
 }
 
 function renderTables() {
-  // Top 10 bullish, bearish
   let sorted = cache.slice().sort((a,b)=>b.score-a.score);
   let top10Bull = sorted.slice(0,10);
   let top10Bear = sorted.slice(-10).reverse();
 
-  // Top 10 subidas de score (actual - prev)
   let ups = cache
     .filter(x=>x.scorePrev!==null)
     .map(x=>({ ...x, diff: x.score-x.scorePrev }))
@@ -264,7 +263,6 @@ function renderTables() {
     .sort((a,b)=>a.diff-b.diff)
     .slice(0,10);
 
-  // Tabla de alertas (máx 20)
   let last20alerts = alerts.slice(-20);
 
   panel.innerHTML = `
@@ -305,3 +303,20 @@ function makeTable(arr, showDiff=false) {
 }
 function alertsTable(arr) {
   let html = `<table><thead><tr><th>Hora</th><th>Símbolo</th><th>Score</th><th>Score Prev</th><th>Phase</th></tr></thead><tbody>`;
+  for(let a of arr) {
+    html += `<tr><td>${new Date(a.time).toLocaleTimeString()}</td>
+    <td>${a.symbol}</td>
+    <td>${a.score.toFixed(2)}</td>
+    <td>${a.scorePrev!==null?a.scorePrev.toFixed(2):'—'}</td>
+    <td>${a.phase}</td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  return html;
+}
+
+// ----------- INICIAR ----------- //
+loadAndRenderBatched();
+  </script>
+</body>
+</html>
