@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OnTrader Index Panel</title>
   <style>
-    :root { --main: #25f0ff; --bg: #101729; --highlight-bull: rgba(0,255,0,0.2); --highlight-bear: rgba(255,0,0,0.2); }
+    :root { --main: #25f0ff; --bg: #101729; }
     body { background: var(--bg); color: #fff; font-family: sans-serif; margin: 0; padding: 20px; }
-    h1 { text-align: center; color: var(--main); margin-bottom: 5px; }
+    h1 { text-align: center; color: var(--main); }
     #formula { text-align: center; color: #aaa; margin-bottom: 15px; font-size: 0.9em; }
     table { width: 100%; border-collapse: collapse; margin: 20px 0; }
     th, td { border: 1px solid #333; padding: 6px; text-align: center; }
@@ -15,159 +15,94 @@
     .high { color: limegreen; font-weight: bold; }
     .mid  { color: orange;    font-weight: bold; }
     .low  { color: red;       font-weight: bold; }
-    .highlight-bull { background: var(--highlight-bull); }
-    .highlight-bear { background: var(--highlight-bear); }
-    #alert-box { position: fixed; bottom: 20px; right: 20px; background: #ff4444; color: #fff; padding: 10px 15px; border-radius: 5px; display: none; box-shadow: 0 0 6px rgba(0,0,0,0.5); }
-    #error-box { color: #f55; font-weight: bold; margin-top: 10px; text-align: center; }
+    .highlight-bull { background: rgba(0,255,0,0.2); }
+    .highlight-bear { background: rgba(255,0,0,0.2); }
+    #alert-box { position: fixed; bottom:20px; right:20px; background:#ff4444; color:#fff; padding:10px 15px; border-radius:5px; display:none; }
+    #error-box { color:#f55; text-align:center; margin-top:10px; }
   </style>
 </head>
 <body>
   <h1>OnTrader Index Panel</h1>
   <div id="formula">Score = 1 + 2·x₁ + 2·x₂ + 3·x₃ + 2·x₄</div>
-  <div id="panel">Inicializando…</div>
+  <div id="panel">Cargando datos…</div>
   <div id="error-box"></div>
   <div id="alert-box"></div>
 
   <script>
-    // DOM selectors
     const panel = document.getElementById('panel');
     const errorBox = document.getElementById('error-box');
     const alertBox = document.getElementById('alert-box');
     const sound = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
 
     window.onerror = msg => { errorBox.innerText = 'Error: ' + msg; return true; };
-    if (typeof fetch !== 'function') {
-      panel.innerText = 'Abra en un navegador real.';
-      throw new Error('Entorno no válido');
-    }
 
-    // Config
-    const API = { 
-      coingecko: 'https://api.coingecko.com/api/v3',
-      proxy: url => 'https://thingproxy.freeboard.io/fetch/' + url
-    };
-    const CONFIG = {
-      stables: ['usdt','usdc','busd','dai','tusd','usdp','gusd','usdn'],
-      perPage: 250, pages: 4,
-      refreshHeavy: 120e3, refreshLight: 60e3,
-      oneHour: 3600e3
-    };
+    const API = 'https://api.coingecko.com/api/v3';
+    const CONFIG = { stables:['usdt','usdc','busd','dai','tusd','usdp','gusd','usdn'], perPage:250, pages:4, heavyInterval:120e3, refreshInterval:60e3, oneHour:3600e3 };
 
-    // Indicators
-    function calcEMA(arr, p){ const k = 2/(p+1); return arr.reduce((a,v,i)=>i?v*k+a*(1-k):v,0); }
-    function calcRSI(a){ let g=0,l=0; for(let i=1;i<a.length;i++){ const d=a[i]-a[i-1]; d>0?g+=d:l-=d;} const ag=g/(a.length-1), al=l/(a.length-1)||1e-6, rs=ag/al; return 100-(100/(1+rs)); }
+    function calcEMA(arr,p){ const k=2/(p+1); return arr.reduce((a,v,i)=>i?v*k+a*(1-k):v,0); }
+    function calcRSI(a){ let g=0,l=0; for(let i=1;i<a.length;i++){const d=a[i]-a[i-1]; d>0?g+=d:l-=d;} const ag=g/(a.length-1), al=l/(a.length-1)||1e-6; return 100-(100/(1+ag/al)); }
+    function computeScore({price,minD,ema28,rsi14}){ const x1=price<minD, x2=price<ema28, x3=rsi14<50, x4=rsi14<30; const raw=1+2*x1+2*x2+3*x3+2*x4; return Math.min(10,Math.max(1,raw)); }
 
-    // Score formula
-    function computeScore({price,minD,ema28,rsi14}){
-      const x1 = price < minD;
-      const x2 = price < ema28;
-      const x3 = rsi14 < 50;
-      const x4 = rsi14 < 30;
-      const raw = 1 + 2*x1 + 2*x2 + 3*x3 + 2*x4;
-      return Math.min(10, Math.max(1, raw));
-    }
+    let cache=[], durations={}, alerts=[];
 
-    // Data loaders
-    async function loadHeavy(){
-      const now = Date.now();
-      if (loadHeavy.cache && now - loadHeavy.ts < CONFIG.refreshHeavy) return loadHeavy.cache;
-      loadHeavy.ts = now;
-      const coins = [];
-      for(let pg=1;pg<=CONFIG.pages;pg++){
-        try{
-          const res = await fetch(`${API.coingecko}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${CONFIG.perPage}&page=${pg}&sparkline=true`);
-          const list = await res.json();
+    async function loadData(){
+      try {
+        const all=[];
+        for(let pg=1; pg<=CONFIG.pages; pg++){
+          const url=`${API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${CONFIG.perPage}&page=${pg}&sparkline=true&price_change_percentage=1h`;
+          const res=await fetch(url);
+          const list=await res.json();
           list.forEach(c=>{
             if(CONFIG.stables.includes(c.symbol)) return;
-            const sp = Array.isArray(c.sparkline_in_7d?.price) ? c.sparkline_in_7d.price : [];
-            coins.push({
-              id: c.id,
-              symbol: c.symbol.toUpperCase(),
-              ema28: sp.length>=28 ? calcEMA(sp.slice(-28),28) : c.current_price,
-              rsi14: sp.length>=15 ? calcRSI(sp.slice(-15)) : 50
-            });
+            const sp=Array.isArray(c.sparkline_in_7d?.price)?c.sparkline_in_7d.price:[];
+            const ema28=sp.length>=28?calcEMA(sp.slice(-28),28):c.current_price;
+            const rsi14=sp.length>=15?calcRSI(sp.slice(-15)):50;
+            all.push({ symbol:c.symbol.toUpperCase(), price:c.current_price, ema28, rsi14, minD:c.low_24h });
           });
-        }catch(e){ console.warn('Heavy load error',e); }
-      }
-      return (loadHeavy.cache = coins);
+        }
+        cache=all;
+        processAndRender();
+      } catch(e){ errorBox.innerText=e.message; }
     }
 
-    async function loadLight(coins){
-      const ids = coins.map(x=>x.id).join(',');
-      const res = await fetch(`${API.coingecko}/simple/price?ids=${ids}&vs_currencies=usd`);
-      const prices = await res.json();
-      return coins.map(c=>({
-        ...c,
-        price: prices[c.id]?.usd||0
-      }));
-    }
-
-    // Process & render
-    async function init(){
-      try{
-        let heavy = await loadHeavy();
-        let items = await loadLight(heavy);
-        processData(items);
-        renderTables(items);
-        setInterval(async()=>{
-          items = await loadLight(heavy);
-          processData(items); renderTables(items);
-        }, CONFIG.refreshLight);
-        setInterval(async()=>{ heavy = await loadHeavy(); }, CONFIG.refreshHeavy);
-      }catch(e){ errorBox.innerText = e.message; }
-    }
-
-    const dur = {}, alerts = [];
-    function processData(arr){
-      const now = Date.now();
-      arr.forEach(d=>{
-        d.score = computeScore(d);
-        if(d.score>=6) dur[d.symbol].b = dur[d.symbol].b||now; else delete dur[d.symbol].b;
-        if(d.score<=3) dur[d.symbol].s = dur[d.symbol].s||now; else delete dur[d.symbol].s;
-        const phase = d.score>=8.1? '🟢 Overbought' : d.score>=6? '🟡 Bullish Incline' : d.score>=4.9? '🟠 Accumulation' : '🔴 Bearish Incline';
-        if((d.score>=6||d.score<=3) && !alerts.find(a=>a.symbol===d.symbol&&a.phase===phase)){
-          alerts.unshift({time: now, symbol:d.symbol, phase}); if(alerts.length>20)alerts.pop(); showAlert(d.symbol, phase);
+    function processAndRender(){
+      const now=Date.now();
+      cache.forEach(d=>{
+        d.score=computeScore(d);
+        durations[d.symbol]=durations[d.symbol]||{};
+        if(d.score>=6) durations[d.symbol].b=durations[d.symbol].b||now; else delete durations[d.symbol].b;
+        if(d.score<=3) durations[d.symbol].s=durations[d.symbol].s||now; else delete durations[d.symbol].s;
+        const phase=d.score>=8.1?'🟢 Overbought':d.score>=6?'🟡 Bullish Incline':d.score>=4.9?'🟠 Accumulation':'🔴 Bearish Incline';
+        if((d.score>=6||d.score<=3)&&!alerts.find(a=>a.symbol===d.symbol&&a.phase===phase)){
+          alerts.unshift({time:now,symbol:d.symbol,phase}); if(alerts.length>20)alerts.pop(); showAlert(d.symbol,phase);
         }
       });
-    }
-
-    function renderTables(arr){
-      const top = arr.slice().sort((a,b)=>b.score-a.score).slice(0,10);
-      const bot = arr.slice().sort((a,b)=>a.score-b.score).slice(0,10);
-      panel.innerHTML =
-        `<h2>Top 10 Bullish</h2>${makeTable(top)}` +
-        `<h2>Top 10 Bearish</h2>${makeTable(bot)}` +
+      const top=cache.sort((a,b)=>b.score-a.score).slice(0,10);
+      const bot=cache.sort((a,b)=>a.score-b.score).slice(0,10);
+      panel.innerHTML=
+        `<h2>Top 10 Bullish</h2>${makeTable(top)}`+
+        `<h2>Top 10 Bearish</h2>${makeTable(bot)}`+
         `<h2>Last 20 Alerts</h2>${alertsTable()}`;
     }
 
-    function makeTable(list){
-      let html = '<table><thead><tr><th>Symbol</th><th>Price</th><th>Score</th><th>Phase</th></tr></thead><tbody>';
+    function makeTable(arr){
+      let html='<table><thead><tr><th>Symbol</th><th>Price</th><th>Score</th><th>Phase</th></tr></thead><tbody>';
       const now=Date.now();
-      list.forEach(d=>{
+      arr.forEach(d=>{
         const s=d.score.toFixed(2);
-        const cls = s>=8?'high':s>=5?'mid':'low';
-        const hl = dur[d.symbol].b&&now-dur[d.symbol].b>CONFIG.oneHour?'highlight-bull': dur[d.symbol].s&&now-dur[d.symbol].s>CONFIG.oneHour?'highlight-bear':'';
-        const phase = s>=8.1? '🟢 Overbought' : s>=6? '🟡 Bullish Incline' : s>=4.9? '🟠 Accumulation' : '🔴 Bearish Incline';
-        html += `<tr class="${hl}"><td>${d.symbol}</td><td>${d.price.toString()}</td><td class="${cls}">${s}</td><td>${phase}</td></tr>`;
+        const cls=s>=8?'high':s>=5?'mid':'low';
+        const hl=durations[d.symbol].b&&now-durations[d.symbol].b>CONFIG.oneHour?'highlight-bull':durations[d.symbol].s&&now-durations[d.symbol].s>CONFIG.oneHour?'highlight-bear':'';
+        html+=`<tr class="${hl}"><td>${d.symbol}</td><td>${d.price.toString()}</td><td class="${cls}">${s}</td><td>${phaseText(s)}</td></tr>`;
       });
-      return html + '</tbody></table>';
+      return html+'</tbody></table>';
     }
 
-    function alertsTable(){
-      let html = '<table><thead><tr><th>Time</th><th>Symbol</th><th>Phase</th></tr></thead><tbody>';
-      alerts.forEach(a=> html+=`<tr><td>${new Date(a.time).toLocaleTimeString()}</td><td>${a.symbol}</td><td>${a.phase}</td></tr>`);
-      return html + '</tbody></table>';
-    }
+    function phaseText(s){return s>=8.1?'🟢 Overbought':s>=6?'🟡 Bullish Incline':s>=4.9?'🟠 Accumulation':'🔴 Bearish Incline';}
+    function alertsTable(){let h='<table><thead><tr><th>Time</th><th>Symbol</th><th>Phase</th></tr></thead><tbody>';alerts.forEach(a=>h+=`<tr><td>${new Date(a.time).toLocaleTimeString()}</td><td>${a.symbol}</td><td>${a.phase}</td></tr>`);return h+'</tbody></table>';}    
+    function showAlert(sym,ph){alertBox.innerText=`🚨 ${sym}: ${ph}`;alertBox.style.display='block';try{sound.currentTime=0;sound.play();}catch{}setTimeout(()=>{sound.pause();alertBox.style.display='none';},8000);}    
 
-    function showAlert(sym,ph){
-      alertBox.innerText = `🚨 ${sym}: ${ph}`;
-      alertBox.style.display = 'block';
-      try{ sound.currentTime=0; sound.play(); }catch{}
-      setTimeout(()=>{ sound.pause(); alertBox.style.display='none'; },8000);
-    }
-
-    // Start
-    init();
+    loadData();
+    setInterval(loadData, CONFIG.refreshHeavy);
   </script>
 </body>
 </html>
