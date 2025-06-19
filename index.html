@@ -1,100 +1,173 @@
-<script>
-  const pares = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"];
-  // Proxy CORS para Binance
-  const proxy = url => 'https://thingproxy.freeboard.io/fetch/' + url;
-  
-  let dataGlobal = [], alerted = new Set();
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Índice OnTrader</title>
+  <style>
+    body { background:#101729; color:#fff; font-family:sans-serif; margin:0; padding:20px }
+    h1 { text-align:center; color:#25f0ff }
+    #panel { overflow-x:auto }
+    table { width:100%; border-collapse:collapse; margin:20px 0 }
+    th, td { border:1px solid #333; padding:6px; text-align:center; min-width:80px }
+    thead { background:#1f2a44; color:#25f0ff }
+    .high { color:limegreen; font-weight:bold }
+    .mid  { color:orange;    font-weight:bold }
+    .low  { color:red;       font-weight:bold }
+    #alerta {
+      position:fixed; bottom:20px; right:20px;
+      background:#ff4444; color:#fff;
+      padding:10px 15px; border-radius:5px;
+      display:none; box-shadow:0 0 6px rgba(0,0,0,0.5);
+      z-index:1000;
+    }
+  </style>
+</head>
+<body>
+  <h1>Índice OnTrader</h1>
+  <div id="panel">Cargando datos…</div>
+  <div id="alerta"></div>
 
-  // Obtiene para un par el max/min de la vela diaria de domingo
-  async function obtenerDomingo(par) {
-    // Trae las últimas 8 velas diarias
-    const url = `https://api.binance.com/api/v3/klines?symbol=${par}&interval=1d&limit=8`;
-    const klines = await fetch(proxy(url)).then(r=>r.json());
-    // Busca la más reciente cuyo getUTCDay()===0 (domingo UTC)
-    const domingoK = klines.reverse().find(k => new Date(k[0]).getUTCDay() === 0);
-    return {
-      max: domingoK ? parseFloat(domingoK[2]) : NaN,
-      min: domingoK ? parseFloat(domingoK[3]) : NaN
-    };
-  }
+  <script>
+    // --- 1) CONFIG: Top200 CoinGecko y sin stablecoins ---
+    const STABLES = ['usdt','usdc','busd','dai','tusd','usdp','usdx','gusd','usdn'];
+    const CG_URL = 'https://api.coingecko.com/api/v3/coins/markets'
+                 + '?vs_currency=usd&order=market_cap_desc&per_page=200&page=1&sparkline=true';
 
-  async function actualizar() {
-    const resultados = [];
-    for (let par of pares) {
+    // --- 2) Proxy CORS para Binance (dinámico domingo) ---
+    const proxy = url => 'https://thingproxy.freeboard.io/fetch/' + url;
+
+    // --- 3) EMA & RSI helpers ---
+    function calcEMA(vals, period) {
+      const k = 2/(period + 1);
+      return vals.reduce((a,v,i) => i ? v*k + a*(1-k) : v, 0);
+    }
+    function calcRSI(arr) {
+      let gains=0, losses=0;
+      for(let i=1;i<arr.length;i++){
+        const d = arr[i] - arr[i-1];
+        if(d>0) gains += d; else losses -= d;
+      }
+      const avgG = gains/(arr.length-1), avgL = losses/(arr.length-1)||1e-6, rs = avgG/avgL;
+      return 100 - (100/(1+rs));
+    }
+
+    // --- 4) Obtener max/min de la vela diaria de domingo (UTC) ---
+    async function obtenerDomingo(par) {
       try {
-        // 1) Precio actual
-        const p     = await fetch(proxy(`https://api.binance.com/api/v3/ticker/price?symbol=${par}`)).then(r=>r.json());
-        const precio= parseFloat(p.price);
+        const url = `https://api.binance.com/api/v3/klines?symbol=${par}`
+                  + `&interval=1d&limit=8`;
+        const kl = await fetch(proxy(url)).then(r=>r.json());
+        // buscar la primera (más reciente) con getUTCDay()===0
+        for (let i=kl.length-1; i>=0; i--) {
+          if (new Date(kl[i][0]).getUTCDay() === 0) {
+            return { max: parseFloat(kl[i][2]), min: parseFloat(kl[i][3]) };
+          }
+        }
+      } catch(e){}
+      return { max: NaN, min: NaN };
+    }
 
-        // 2) Velas horarias para EMA/RSI
-        const klH   = await fetch(proxy(`https://api.binance.com/api/v3/klines?symbol=${par}&interval=1h&limit=15`))
-                              .then(r=>r.json());
-        const cierres = klH.map(k=>parseFloat(k[4]));
+    let dataGlobal = [], alerted = new Set();
 
-        // 3) EMA28 y RSI14
-        const ema = calcEMA(cierres.slice(-28), 28);
-        const rsi = calcRSI(cierres);
+    // --- 5) Traer y calcular todo ---
+    async function actualizar(){
+      document.getElementById('panel').innerText = 'Cargando datos…';
+      // 5.1) Top200 CoinGecko
+      const cg = await fetch(CG_URL).then(r=>r.json());
+      const arr = cg.filter(c => !STABLES.includes(c.symbol.toLowerCase()));
 
-        // 4) MÁX / MÍN de domingo
-        const {max, min} = await obtenerDomingo(par);
+      // 5.2) Para cada cripto, calculos
+      const resultados = [];
+      for (let c of arr) {
+        const sym = c.symbol.toUpperCase();
+        const par = sym + 'USDT';
+        try {
+          // Precio
+          const precio = c.current_price;
+          // Sparkline 7d
+          const closes7 = c.sparkline_in_7d.price;
+          // EMA28 y RSI14
+          const ema28 = calcEMA(closes7.slice(-28), 28);
+          const rsi14 = calcRSI(closes7.slice(-15));
+          // Domingo dinámico
+          const {max: domMax, min: domMin} = await obtenerDomingo(par);
+          // Score
+          let score = 0;
+          if (!isNaN(domMin) && precio > domMin)               score += 1;
+          if (!isNaN(domMin) && !isNaN(domMax) && precio > (domMin+domMax)/2) score += 2;
+          if (!isNaN(domMax) && precio > domMax)               score += 2;
+          if (!isNaN(domMin) && precio < domMin)               score += 2;
+          if ((precio % 1) < 0.2)                              score += 1;     // cierre redondo
+          if (precio > ema28)                                  score += 2;
+          if (rsi14 > 50)                                      score += 1;     // RSI +1
+          if (rsi14 < 50)                                      score -= 1;     // RSI -1
+          // clamp entre 1 y 10
+          score = Math.min(10, Math.max(1, score));
 
-        // 5) Cálculo del Índice OnTrader
-        let score = 0;
-        if (precio > min) score += 1;
-        if (precio > (min + max)/2) score += 2;
-        if (precio > max) score += 2;
-        if (precio < min) score += 2;
-        if ((precio % 1) < 0.2) score += 1;
-        if (precio > ema) score += 2;
-        if (rsi > 60 || rsi < 40) score += 2.5;
-        score = Math.min(10, Math.max(1, score));
+          // fase
+          let fase = '🔴 Debilidad excesiva';
+          if      (score >= 8.1) fase = '🟢 Fuerza excesiva';
+          else if (score >= 6.0) fase = '🟡 Fase de inclinación alcista';
+          else if (score >= 4.9) fase = '🟠 Fase de acumulación';
+          else if (score >= 3.1) fase = '🔴 Fase de inclinación bajista';
 
-        // 6) Alerta
-        const alerta = score >= 7
-          ? `🚨 ${par.replace('USDT','')} Índice ${score}`
-          : '-';
+          resultados.push({
+            cripto: sym,
+            precio,
+            indice: score.toFixed(1),
+            fase
+          });
+        } catch(e) {
+          console.warn('Error cripto', sym, e);
+        }
+      }
+      dataGlobal = resultados;
+      renderTables();
+      mostrarAlertas();
+    }
 
-        resultados.push({
-          cripto: par.replace('USDT',''),
-          precio,
-          indice: score,
-          alerta
-        });
-      } catch(e) {
-        console.warn('Error con', par, e);
+    // --- 6) Mostrar Top10 / Bottom10 ---
+    function renderTables(){
+      const top = [...dataGlobal].sort((a,b)=>b.indice-a.indice).slice(0,10);
+      const bot = [...dataGlobal].sort((a,b)=>a.indice-b.indice).slice(0,10);
+
+      const mk = arr => `
+        <table>
+          <thead><tr><th>Cripto</th><th>Precio</th><th>Índice</th><th>Fase</th></tr></thead>
+          <tbody>${arr.map(d=>`
+            <tr>
+              <td>${d.cripto}</td>
+              <td>${d.precio.toLocaleString()}</td>
+              <td class="${d.indice>=8?'high':d.indice>=5?'mid':'low'}">${d.indice}</td>
+              <td>${d.fase}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+
+      document.getElementById('panel').innerHTML =
+        `<h2>Top 10 Alcistas</h2>${mk(top)}
+         <h2>Top 10 Bajistas</h2>${mk(bot)}`;
+    }
+
+    // --- 7) Alertas visuales/sonoras (≥6 ó ≤3) ---
+    function mostrarAlertas(){
+      const el = document.getElementById('alerta');
+      const n = dataGlobal.find(d=>
+        !alerted.has(d.cripto) && (d.indice>=6 || d.indice<=3)
+      );
+      if(n){
+        alerted.add(n.cripto);
+        el.innerText = `🚨 ${n.cripto}: ${n.fase}`;
+        el.style.display = 'block';
+        new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play();
+        setTimeout(()=> el.style.display='none',10000);
       }
     }
-    dataGlobal = resultados;
-    renderTabla();
-    mostrarAlerta();
-  }
 
-  function calcEMA(vals, period) {
-    const k = 2/(period + 1);
-    return vals.reduce((acc, v, i) => i
-      ? v*k + acc*(1-k)
-      : v
-    );
-  }
-
-  function calcRSI(arr) {
-    let gains=0, losses=0;
-    for (let i=1; i<arr.length; i++){
-      const d = arr[i] - arr[i-1];
-      if (d>0) gains += d;
-      else losses -= d;
-    }
-    const avgG = gains/(arr.length-1);
-    const avgL = losses/(arr.length-1) || 1e-6;
-    const rs = avgG/avgL;
-    return 100 - (100/(1+rs));
-  }
-
-  // renderTabla() y mostrarAlerta() quedan igual…
-  document.getElementById('buscar').addEventListener('input', renderTabla);
-  document.getElementById('orden').addEventListener('change', renderTabla);
-
-  // Primera carga
-  actualizar();
-  setInterval(actualizar, 30000);
-</script>
+    // --- 8) Arrancar y refrescar cada 30s ---
+    actualizar();
+    setInterval(actualizar,30000);
+  </script>
+</body>
+</html>
