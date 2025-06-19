@@ -3,279 +3,162 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>OnTrader Index Panel (Futuros)</title>
+  <title>OnTrader Index Panel (Futures)</title>
   <style>
-    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
-    body { background: #101729; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; }
-    h1 { margin: 0; padding: 10px; text-align: center; color: #25f0ff; font-size: 1.5rem; }
-    #formula { text-align: center; color: #aaa; font-size: 0.9rem; padding-bottom: 10px; }
-    #panel { flex: 1; overflow: auto; padding: 0 10px; }
-    .loading { text-align: center; padding: 50px; font-size: 1.2rem; color: #888; }
-    table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+    body { background: #101729; color: #fff; font-family: sans-serif; margin: 0; padding: 0; }
+    h1 { text-align: center; color: #25f0ff; }
+    #panel { padding: 10px; }
+    .loading { text-align: center; padding: 40px; font-size: 1.2rem; }
+    table { width: 100%; border-collapse: collapse; margin: 10px 0; }
     th, td { border: 1px solid #333; padding: 6px; text-align: center; }
     thead { background: #1f2a44; color: #25f0ff; }
     .high { color: limegreen; }
     .mid { color: orange; }
     .low { color: red; }
-    .notradable { color: #aaa; font-style: italic; }
-    .highlight-bull { background: rgba(0,255,0,0.18); }
-    .highlight-bear { background: rgba(255,0,0,0.18); }
-    #error-box { text-align: center; color: #f55; padding: 5px; }
-    #alert-box { margin: 0 0 10px 0; text-align: left; font-size: 0.97em;}
-    #alert-box table { margin: 10px auto; }
-    #alert-box th, #alert-box td { font-size: 0.98em; }
   </style>
 </head>
 <body>
-  <h1>OnTrader Index Panel (Futuros)</h1>
-  <div id="formula">
-    <span style="font-size:0.95em;">
-         
-    </span>
-  </div>
-  <div id="panel"><div class="loading">Cargando datos…</div></div>
-  <div id="alert-box"></div>
-  <div id="error-box"></div>
+  <h1>OnTrader Index Panel (Futures)</h1>
+  <div id="panel"><div class="loading">Cargando datos de Binance Futures…</div></div>
+  <script>
+    const STABLES = ['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP', 'GUSD', 'USDN'];
+    const panel = document.getElementById('panel');
+    const REFRESH = 120000;
+    let previousScores = JSON.parse(localStorage.getItem('ontraderScores') || '{}');
 
-<script>
-const COINGECKO = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false';
-const BINANCE_FUTURES = 'https://fapi.binance.com/fapi/v1/exchangeInfo';
-const BINANCE_KLINES = 'https://fapi.binance.com/fapi/v1/klines';
-const STABLES = new Set(['USDT','USDC','BUSD','DAI','TUSD','USDP','GUSD','USDN']);
-const INTERVAL = 120000; // 2 min
-
-const panel = document.getElementById('panel');
-const errorBox = document.getElementById('error-box');
-const alertBox = document.getElementById('alert-box');
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function round(n, d=6) { return Number(n).toFixed(d); }
-function limit(v, a, b) { return Math.max(a, Math.min(b, v)); }
-
-function calcEMA(arr, period) {
-  const k = 2 / (period + 1);
-  return arr.reduce((a, v, i) => i ? v * k + a * (1 - k) : v, 0);
-}
-function calcRSI(arr) {
-  let g=0, l=0;
-  for(let i=1; i<arr.length; i++){
-    const d = arr[i] - arr[i-1];
-    if (d > 0) g += d;
-    else l -= d;
-  }
-  const ag = g/(arr.length-1), al = l/(arr.length-1)||1e-6, rs = ag/al;
-  return 100-(100/(1+rs));
-}
-async function fetchRetry(url, retries=2) {
-  for(let i=0; i<=retries; i++) {
-    try {
-      const r = await fetch(url);
-      if (!r.ok) throw new Error('Status '+r.status);
-      return await r.json();
-    } catch(e) {
-      if (i === retries) throw e;
-      await sleep(600 + 700 * i);
+    function isStable(symbol) {
+      return STABLES.some(st => symbol.endsWith(st));
     }
-  }
-}
 
-function getLastSundayMaxMin(klines) {
-  for(let i=klines.length-1; i>=0; i--) {
-    const t = klines[i][0];
-    const d = new Date(t);
-    if (d.getUTCDay() === 0) { // Domingo
-      return { max: Number(klines[i][2]), min: Number(klines[i][3]) };
+    function calcEMA(arr, period) {
+      const k = 2 / (period + 1);
+      return arr.reduce((a, v, i) => (i ? v * k + a * (1 - k) : v), 0);
     }
-  }
-  return { max: Number(klines[klines.length-1][2]), min: Number(klines[klines.length-1][3]) };
-}
 
-function computeScoreHierarchical({
-  price, maxD, minD,
-  ema28_15m, rsi15m,
-  ema28_5m, rsi5m,
-  rsi4m
-}) {
-  let score = 1;
-  if (price > minD) score += 3;
-  if (price > maxD) score += 2;
-  if (price < minD) score -= 2;
-  if (rsi15m > 50 && price > ema28_15m) score += 2;
-  if (rsi15m < 50 && price < ema28_15m) score -= 2;
-  if (rsi5m > 70 && price > ema28_5m) score += 1;
-  if (rsi5m < 30 && price < ema28_5m) score -= 1;
-  if (rsi4m < 15) score += 0.5;
-  if (rsi4m > 85) score -= 0.5;
-  return limit(score, 1, 10);
-}
-
-function phaseText(s) {
-  if (s <= 3.0) return '🔴 Oversold';
-  else if (s < 4.9) return '🔴 Bearish Incline';
-  else if (s < 6.0) return '🟠 Accumulation';
-  else if (s < 8.1) return '🟡 Bullish Incline';
-  else return '🟢 Overbought';
-}
-
-// LocalStorage helpers
-function getLS(key, fallback) {
-  try {
-    const val = localStorage.getItem(key);
-    return val ? JSON.parse(val) : fallback;
-  } catch { return fallback; }
-}
-function setLS(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-}
-
-// Estado global persistente en localStorage
-let previousScores = getLS('ontraderPrevScores', {});    // {SYMBOL: prevScore}
-let phaseHistory   = getLS('ontraderPhaseHistory', {});  // {SYMBOL: prevPhase}
-let alertHistory   = getLS('ontraderAlertHistory', []);  // [{time, symbol, oldPhase, newPhase, price, score}]
-
-async function loadPanel() {
-  panel.innerHTML = '<div class="loading">Cargando datos…</div>';
-  errorBox.innerText = '';
-  try {
-    // 1. Get top 100 by market cap (no stables)
-    const cg = await fetchRetry(COINGECKO);
-    // 2. Obtener contratos de futuros disponibles
-    const futuresInfo = await fetchRetry(BINANCE_FUTURES);
-    const futureSymbols = new Set(
-      futuresInfo.symbols
-        .filter(s => s.contractType === "PERPETUAL" && s.symbol.endsWith("USDT"))
-        .map(s => s.baseAsset.toUpperCase())
-    );
-
-    // 3. Filtrar y mapear solo futuros PERPETUAL no stablecoin del top 100 CG
-    const assets = cg
-      .filter(c => c.symbol && !STABLES.has(c.symbol.toUpperCase()))
-      .map(c => ({
-        symbol: c.symbol.toUpperCase(),
-        binanceSymbol: c.symbol.toUpperCase() + 'USDT',
-        price: c.current_price
-      }))
-      .filter(a => futureSymbols.has(a.symbol));
-
-    let result = [];
-    let newPrevScores = { ...previousScores };
-    let newPhaseHistory = { ...phaseHistory };
-    let newAlertHistory = [ ...(alertHistory || []) ];
-
-    for (let i = 0; i < assets.length; i++) {
-      const { symbol, binanceSymbol, price } = assets[i];
-      let score = 0, prevScore = previousScores[symbol] || 0, phase = "", oldPhase = "";
-      try {
-        const dayK = await fetchRetry(`${BINANCE_KLINES}?symbol=${binanceSymbol}&interval=1d&limit=10`);
-        const { max: maxD, min: minD } = getLastSundayMaxMin(dayK);
-        const k15 = await fetchRetry(`${BINANCE_KLINES}?symbol=${binanceSymbol}&interval=15m&limit=28`);
-        const close15m = k15.map(x=>Number(x[4]));
-        const ema28_15m = calcEMA(close15m, 28);
-        const rsi15m = calcRSI(close15m);
-        const k5 = await fetchRetry(`${BINANCE_KLINES}?symbol=${binanceSymbol}&interval=5m&limit=28`);
-        const close5m = k5.map(x=>Number(x[4]));
-        const ema28_5m = calcEMA(close5m, 28);
-        const rsi5m = calcRSI(close5m);
-        const k4 = await fetchRetry(`${BINANCE_KLINES}?symbol=${binanceSymbol}&interval=4m&limit=15`);
-        const close4m = k4.map(x=>Number(x[4]));
-        const rsi4m = calcRSI(close4m);
-        score = computeScoreHierarchical({
-          price,
-          maxD, minD,
-          ema28_15m, rsi15m,
-          ema28_5m, rsi5m,
-          rsi4m
-        });
-        phase = phaseText(score);
-        oldPhase = phaseHistory[symbol] || phase;
-        // Registrar alerta si la fase cambió
-        if (phase !== oldPhase) {
-          newAlertHistory.unshift({
-            time: new Date().toLocaleTimeString(),
-            symbol, oldPhase, newPhase: phase, price, score: score.toFixed(2)
-          });
-          newAlertHistory = newAlertHistory.slice(0, 20); // Mantener solo las últimas 20
-        }
-        // Actualizar historia
-        newPrevScores[symbol] = score;
-        newPhaseHistory[symbol] = phase;
-        result.push({
-          symbol, price,
-          score, prevScore,
-          phase
-        });
-      } catch (e) {
-        result.push({
-          symbol,
-          price: 0,
-          score: 0,
-          prevScore,
-          phase: 'No Binance',
-          notradable: true
-        });
+    function calcRSI(prices, period = 14) {
+      let gain = 0, loss = 0;
+      for (let i = 1; i < prices.length; i++) {
+        const diff = prices[i] - prices[i - 1];
+        if (diff > 0) gain += diff;
+        else loss -= diff;
       }
-      await sleep(190);
+      const avgGain = gain / period;
+      const avgLoss = (loss || 1e-6) / period;
+      const rs = avgGain / avgLoss;
+      return 100 - 100 / (1 + rs);
     }
 
-    // Guardar persistente
-    previousScores = newPrevScores;
-    phaseHistory = newPhaseHistory;
-    alertHistory = newAlertHistory;
-    setLS('ontraderPrevScores', previousScores);
-    setLS('ontraderPhaseHistory', phaseHistory);
-    setLS('ontraderAlertHistory', alertHistory);
+    // Score formula según reglas jerárquicas, modificar según tu lógica nueva
+    function computeScore({ price, minSunday, maxSunday, ema15m, rsi15m, ema5m, rsi5m, rsi4m }) {
+      let score = 1;
+      // 1) Precio > mínimo domingo: +3, si > máximo domingo: +2 extra
+      if (price > minSunday) score += 3;
+      if (price > maxSunday) score += 2;
+      // 2) 15m: RSI>50 y precio>EMA28: +2 | RSI<50 y precio<EMA28: -2
+      if (rsi15m > 50 && price > ema15m) score += 2;
+      if (rsi15m < 50 && price < ema15m) score -= 2;
+      // 3) 5m: RSI>70 y precio>EMA28: +1 | RSI<30 y precio<EMA28: -1
+      if (rsi5m > 70 && price > ema5m) score += 1;
+      if (rsi5m < 30 && price < ema5m) score -= 1;
+      // 4) 4m: RSI<15: +0.5 | RSI>85: -0.5
+      if (rsi4m < 15) score += 0.5;
+      if (rsi4m > 85) score -= 0.5;
+      return Math.min(10, Math.max(1, score));
+    }
 
-    renderAll(result);
-    renderAlerts();
-  } catch (e) {
-    errorBox.innerText = 'Error cargando datos: '+e.message;
-  }
-  setTimeout(loadPanel, INTERVAL);
-}
+    function phaseText(s) {
+      if (s <= 3.0) return '🔴 Oversold';
+      else if (s < 4.9) return '🔴 Bearish Incline';
+      else if (s < 6.0) return '🟠 Accumulation';
+      else if (s < 8.1) return '🟡 Bullish Incline';
+      else return '🟢 Overbought';
+    }
 
-function renderAll(list) {
-  const sorted = list.filter(x=>!x.notradable).sort((a,b)=>b.score-a.score);
-  let html = `<table><thead>
-    <tr><th>Symbol</th><th>Price</th><th>Prev. Score</th><th>Score</th><th>Phase</th></tr>
-    </thead><tbody>`;
-  for (const d of sorted) {
-    const cls = d.score>=8?'high':d.score>=5?'mid':'low';
-    html += `<tr>
-      <td>${d.symbol}</td>
-      <td>${round(d.price)}</td>
-      <td>${Number(d.prevScore).toFixed(2)}</td>
-      <td class="${cls}">${d.score.toFixed(2)}</td>
-      <td>${d.phase}</td>
-    </tr>`;
-  }
-  html += '</tbody></table>';
-  panel.innerHTML = html;
-}
+    async function fetchTop100Futures() {
+      // Binance Futures 24h tickers (gives volume for sorting)
+      const tickers = await fetch('https://fapi.binance.com/fapi/v1/ticker/24hr').then(r => r.json());
+      const sorted = tickers
+        .filter(t => t.symbol.endsWith('USDT') && !isStable(t.symbol.replace('USDT','')))
+        .sort((a, b) => +b.quoteVolume - +a.quoteVolume)
+        .slice(0, 100);
+      return sorted.map(t => t.symbol);
+    }
 
-function renderAlerts() {
-  if (!alertHistory || alertHistory.length === 0) {
-    alertBox.innerHTML = '';
-    return;
-  }
-  let html = `<table><thead>
-    <tr><th>Time</th><th>Symbol</th><th>Old Phase</th><th>New Phase</th><th>Price</th><th>Score</th></tr>
-    </thead><tbody>`;
-  for (const a of alertHistory) {
-    html += `<tr>
-      <td>${a.time}</td>
-      <td>${a.symbol}</td>
-      <td>${a.oldPhase}</td>
-      <td>${a.newPhase}</td>
-      <td>${round(a.price)}</td>
-      <td>${a.score}</td>
-    </tr>`;
-  }
-  html += '</tbody></table>';
-  alertBox.innerHTML = `<b>Last 20 Phase Alerts</b>` + html;
-}
+    async function fetchKlines(symbol, interval, limit = 100) {
+      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+      return fetch(url).then(r => r.json());
+    }
 
-// --- INICIO ---
-loadPanel();
-</script>
+    async function getSundayExtremes(symbol) {
+      // Busca mínimo y máximo del domingo pasado (simple: últimos 7 días, cada 4h)
+      const klines = await fetchKlines(symbol, '4h', 50); // ~8 días de 4h velas
+      const sundays = [];
+      for (let i = 0; i < klines.length; i++) {
+        const time = new Date(klines[i][0]);
+        if (time.getUTCDay() === 0) { // Domingo
+          sundays.push(+klines[i][3], +klines[i][2]); // high, low
+        }
+      }
+      if (sundays.length) {
+        return { max: Math.max(...sundays), min: Math.min(...sundays) };
+      }
+      // fallback: últimos valores
+      return { max: +klines[klines.length-1][2], min: +klines[klines.length-1][3] };
+    }
+
+    async function fetchAllData() {
+      panel.innerHTML = '<div class="loading">Cargando datos de Binance Futures…</div>';
+      const topSymbols = await fetchTop100Futures();
+      const results = [];
+      for (const symbol of topSymbols) {
+        try {
+          const [klines15m, klines5m, klines4m] = await Promise.all([
+            fetchKlines(symbol, '15m', 40),
+            fetchKlines(symbol, '5m', 40),
+            fetchKlines(symbol, '4m', 40)
+          ]);
+          const price = +klines15m.at(-1)[4]; // close
+          const ema15m = calcEMA(klines15m.map(k=>+k[4]), 28);
+          const rsi15m = calcRSI(klines15m.map(k=>+k[4]).slice(-15));
+          const ema5m = calcEMA(klines5m.map(k=>+k[4]), 28);
+          const rsi5m = calcRSI(klines5m.map(k=>+k[4]).slice(-14));
+          const rsi4m = calcRSI(klines4m.map(k=>+k[4]).slice(-14));
+          const { min: minSunday, max: maxSunday } = await getSundayExtremes(symbol);
+          const prevScore = previousScores[symbol] || null;
+          const score = computeScore({ price, minSunday, maxSunday, ema15m, rsi15m, ema5m, rsi5m, rsi4m });
+          results.push({
+            symbol, price, minSunday, maxSunday, ema15m, rsi15m, ema5m, rsi5m, rsi4m, score, prevScore
+          });
+          previousScores[symbol] = score;
+        } catch (e) { /* handle errors, skip this symbol */ }
+      }
+      localStorage.setItem('ontraderScores', JSON.stringify(previousScores));
+      return results;
+    }
+
+    function renderTable(data) {
+      let html = '<table><thead><tr><th>Symbol</th><th>Price</th><th>Score</th><th>Prev Score</th><th>Phase</th></tr></thead><tbody>';
+      data.forEach(d => {
+        const cls = d.score >= 8 ? 'high' : d.score >= 5 ? 'mid' : 'low';
+        html += `<tr>
+          <td>${d.symbol}</td>
+          <td>${d.price.toFixed(5)}</td>
+          <td class="${cls}">${d.score.toFixed(2)}</td>
+          <td>${d.prevScore !== null ? d.prevScore.toFixed(2) : '-'}</td>
+          <td>${phaseText(d.score)}</td>
+        </tr>`;
+      });
+      html += '</tbody></table>';
+      return html;
+    }
+
+    async function refreshPanel() {
+      const data = await fetchAllData();
+      panel.innerHTML = renderTable(data);
+    }
+
+    refreshPanel();
+    setInterval(refreshPanel, REFRESH);
+  </script>
 </body>
 </html>
