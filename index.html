@@ -3,9 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>OnTrader Index Panel</title>
+  <title>OnTrader Index Panel (Futuros)</title>
   <style>
-    /* Full screen reset for Blogger embed */
     html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
     body { background: #101729; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; }
     h1 { margin: 0; padding: 10px; text-align: center; color: #25f0ff; font-size: 1.5rem; }
@@ -18,107 +17,271 @@
     .high { color: limegreen; }
     .mid { color: orange; }
     .low { color: red; }
-    .highlight-bull { background: rgba(0,255,0,0.2); }
-    .highlight-bear { background: rgba(255,0,0,0.2); }
-    #alert-box { position: fixed; bottom: 10px; right: 10px; background: #ff4444; color: #fff; padding: 8px 12px; border-radius: 4px; display: none; z-index: 1000; }
+    .notradable { color: #aaa; font-style: italic; }
+    .highlight-bull { background: rgba(0,255,0,0.18); }
+    .highlight-bear { background: rgba(255,0,0,0.18); }
     #error-box { text-align: center; color: #f55; padding: 5px; }
+    #alert-box { margin: 0 0 10px 0; text-align: left; font-size: 0.97em;}
+    #alert-box table { margin: 10px auto; }
+    #alert-box th, #alert-box td { font-size: 0.98em; }
   </style>
 </head>
 <body>
-  <h1>OnTrader Index Panel</h1>
-  <div id="formula">Score = 1 + 2·x₁ + 2·x₂ + 3·x₃ + 2·x₄</div>
+  <h1>OnTrader Index Panel (Futuros)</h1>
+  <div id="formula">
+    <span style="font-size:0.95em;">
+      Score: <br>
+      1) Precio &gt; mínimo del domingo: +3<br>
+      1) Precio &gt; máximo del domingo: +2 extra<br>
+      2) En 15m RSI&gt;50 y precio&gt;EMA28: +2 | RSI&lt;50 y precio&lt;EMA28: -2<br>
+      3) En 5m RSI&gt;70 y precio&gt;EMA28: +1 | RSI&lt;30 y precio&lt;EMA28: -1<br>
+      4) En 4m RSI&lt;15: +0.5 | RSI&gt;85: -0.5<br>
+      [Score entre 1 y 10]
+    </span>
+  </div>
   <div id="panel"><div class="loading">Cargando datos…</div></div>
-  <div id="error-box"></div>
   <div id="alert-box"></div>
+  <div id="error-box"></div>
 
-  <script>
-    const panel = document.getElementById('panel');
-    const errorBox = document.getElementById('error-box');
-    const alertBox = document.getElementById('alert-box');
-    const sound = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
-    const API_BASE = 'https://api.coingecko.com/api/v3';
-    const TIMEOUT = 10000;
-    const CONFIG = {
-      stables: new Set(['USDT','USDC','BUSD','DAI','TUSD','USDP','GUSD','USDN']),
-      perPage: 100,
-      pages: 1,
-      refreshInterval: 120000,
-      oneHour: 3600000
-    };
-    let cache = [], durations = {}, alerts = [];
+<script>
+const COINGECKO = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false';
+const BINANCE_FUTURES = 'https://fapi.binance.com/fapi/v1/exchangeInfo';
+const BINANCE_KLINES = 'https://fapi.binance.com/fapi/v1/klines';
+const STABLES = new Set(['USDT','USDC','BUSD','DAI','TUSD','USDP','GUSD','USDN']);
+const INTERVAL = 120000; // 2 min
 
-    async function fetchWithFallback(url) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), TIMEOUT);
-      const tryFetch = async target => {
-        const resp = await fetch(target, { signal: controller.signal });
-        if (!resp.ok) throw new Error(`Status ${resp.status}`);
-        return resp.json();
-      };
-      try { return await tryFetch(url); } catch {};
-      const proxies = [
-        u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-        u => `https://thingproxy.freeboard.io/fetch/${u}`
-      ];
-      for (const proxy of proxies) {
-        try { const data = await tryFetch(proxy(url)); clearTimeout(timer); return data; } catch {};
-      }
-      clearTimeout(timer);
-      throw new Error('No se pudo obtener datos de la API');
+const panel = document.getElementById('panel');
+const errorBox = document.getElementById('error-box');
+const alertBox = document.getElementById('alert-box');
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function round(n, d=6) { return Number(n).toFixed(d); }
+function limit(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+function calcEMA(arr, period) {
+  const k = 2 / (period + 1);
+  return arr.reduce((a, v, i) => i ? v * k + a * (1 - k) : v, 0);
+}
+function calcRSI(arr) {
+  let g=0, l=0;
+  for(let i=1; i<arr.length; i++){
+    const d = arr[i] - arr[i-1];
+    if (d > 0) g += d;
+    else l -= d;
+  }
+  const ag = g/(arr.length-1), al = l/(arr.length-1)||1e-6, rs = ag/al;
+  return 100-(100/(1+rs));
+}
+async function fetchRetry(url, retries=2) {
+  for(let i=0; i<=retries; i++) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('Status '+r.status);
+      return await r.json();
+    } catch(e) {
+      if (i === retries) throw e;
+      await sleep(600 + 700 * i);
     }
+  }
+}
 
-    function calcEMA(arr, p) { const k = 2/(p+1); return arr.reduce((a,v,i)=>i?v*k+a*(1-k):v,0); }
-    function calcRSI(arr) { let g=0,l=0; for(let i=1;i<arr.length;i++){const d=arr[i]-arr[i-1]; d>0?g+=d:l-=d;} const ag=g/(arr.length-1), al=l/(arr.length-1)||1e-6, rs=ag/al; return 100-(100/(1+rs)); }
-    function computeScore({price,minD,ema28,rsi14}) { const x1=+(price<minD), x2=+(price<ema28), x3=+(rsi14<50), x4=+(rsi14<30), raw=1+2*x1+2*x2+3*x3+2*x4; return Math.min(10,Math.max(1,raw)); }
-    function phaseText(s) {
-      if (s <= 3.0) return '🔴 Oversold';
-      else if (s < 4.9) return '🔴 Bearish Incline';
-      else if (s < 6.0) return '🟠 Accumulation';
-      else if (s < 8.1) return '🟡 Bullish Incline';
-      else return '🟢 Overbought';
+function getLastSundayMaxMin(klines) {
+  for(let i=klines.length-1; i>=0; i--) {
+    const t = klines[i][0];
+    const d = new Date(t);
+    if (d.getUTCDay() === 0) { // Domingo
+      return { max: Number(klines[i][2]), min: Number(klines[i][3]) };
     }
+  }
+  return { max: Number(klines[klines.length-1][2]), min: Number(klines[klines.length-1][3]) };
+}
 
-    async function loadData() {
-      panel.innerHTML = '<div class="loading">Cargando datos…</div>';
-      errorBox.innerText = '';
+function computeScoreHierarchical({
+  price, maxD, minD,
+  ema28_15m, rsi15m,
+  ema28_5m, rsi5m,
+  rsi4m
+}) {
+  let score = 1;
+  if (price > minD) score += 3;
+  if (price > maxD) score += 2;
+  if (price < minD) score -= 2;
+  if (rsi15m > 50 && price > ema28_15m) score += 2;
+  if (rsi15m < 50 && price < ema28_15m) score -= 2;
+  if (rsi5m > 70 && price > ema28_5m) score += 1;
+  if (rsi5m < 30 && price < ema28_5m) score -= 1;
+  if (rsi4m < 15) score += 0.5;
+  if (rsi4m > 85) score -= 0.5;
+  return limit(score, 1, 10);
+}
+
+function phaseText(s) {
+  if (s <= 3.0) return '🔴 Oversold';
+  else if (s < 4.9) return '🔴 Bearish Incline';
+  else if (s < 6.0) return '🟠 Accumulation';
+  else if (s < 8.1) return '🟡 Bullish Incline';
+  else return '🟢 Overbought';
+}
+
+// LocalStorage helpers
+function getLS(key, fallback) {
+  try {
+    const val = localStorage.getItem(key);
+    return val ? JSON.parse(val) : fallback;
+  } catch { return fallback; }
+}
+function setLS(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+
+// Estado global persistente en localStorage
+let previousScores = getLS('ontraderPrevScores', {});    // {SYMBOL: prevScore}
+let phaseHistory   = getLS('ontraderPhaseHistory', {});  // {SYMBOL: prevPhase}
+let alertHistory   = getLS('ontraderAlertHistory', []);  // [{time, symbol, oldPhase, newPhase, price, score}]
+
+async function loadPanel() {
+  panel.innerHTML = '<div class="loading">Cargando datos…</div>';
+  errorBox.innerText = '';
+  try {
+    // 1. Get top 100 by market cap (no stables)
+    const cg = await fetchRetry(COINGECKO);
+    // 2. Obtener contratos de futuros disponibles
+    const futuresInfo = await fetchRetry(BINANCE_FUTURES);
+    const futureSymbols = new Set(
+      futuresInfo.symbols
+        .filter(s => s.contractType === "PERPETUAL" && s.symbol.endsWith("USDT"))
+        .map(s => s.baseAsset.toUpperCase())
+    );
+
+    // 3. Filtrar y mapear solo futuros PERPETUAL no stablecoin del top 100 CG
+    const assets = cg
+      .filter(c => c.symbol && !STABLES.has(c.symbol.toUpperCase()))
+      .map(c => ({
+        symbol: c.symbol.toUpperCase(),
+        binanceSymbol: c.symbol.toUpperCase() + 'USDT',
+        price: c.current_price
+      }))
+      .filter(a => futureSymbols.has(a.symbol));
+
+    let result = [];
+    let newPrevScores = { ...previousScores };
+    let newPhaseHistory = { ...phaseHistory };
+    let newAlertHistory = [ ...(alertHistory || []) ];
+
+    for (let i = 0; i < assets.length; i++) {
+      const { symbol, binanceSymbol, price } = assets[i];
+      let score = 0, prevScore = previousScores[symbol] || 0, phase = "", oldPhase = "";
       try {
-        const pages = [1];
-        const results = await Promise.all(pages.map(pg => fetchWithFallback(
-          `${API_BASE}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${CONFIG.perPage}&page=${pg}&sparkline=true`
-        )));
-        let list = results.flat().slice(0,100);
-        cache = list.filter(c=>c.symbol && !CONFIG.stables.has(c.symbol.toUpperCase()))
-          .map(c=>{
-            const sym=c.symbol.toUpperCase(); const prices=Array.isArray(c.sparkline_in_7d?.price)?c.sparkline_in_7d.price:[];
-            return { symbol:sym, price:c.current_price, minD:c.low_24h, ema28:prices.length>=28?calcEMA(prices.slice(-28),28):c.current_price, rsi14:prices.length>=15?calcRSI(prices.slice(-15)):50 };
+        const dayK = await fetchRetry(`${BINANCE_KLINES}?symbol=${binanceSymbol}&interval=1d&limit=10`);
+        const { max: maxD, min: minD } = getLastSundayMaxMin(dayK);
+        const k15 = await fetchRetry(`${BINANCE_KLINES}?symbol=${binanceSymbol}&interval=15m&limit=28`);
+        const close15m = k15.map(x=>Number(x[4]));
+        const ema28_15m = calcEMA(close15m, 28);
+        const rsi15m = calcRSI(close15m);
+        const k5 = await fetchRetry(`${BINANCE_KLINES}?symbol=${binanceSymbol}&interval=5m&limit=28`);
+        const close5m = k5.map(x=>Number(x[4]));
+        const ema28_5m = calcEMA(close5m, 28);
+        const rsi5m = calcRSI(close5m);
+        const k4 = await fetchRetry(`${BINANCE_KLINES}?symbol=${binanceSymbol}&interval=4m&limit=15`);
+        const close4m = k4.map(x=>Number(x[4]));
+        const rsi4m = calcRSI(close4m);
+        score = computeScoreHierarchical({
+          price,
+          maxD, minD,
+          ema28_15m, rsi15m,
+          ema28_5m, rsi5m,
+          rsi4m
+        });
+        phase = phaseText(score);
+        oldPhase = phaseHistory[symbol] || phase;
+        // Registrar alerta si la fase cambió
+        if (phase !== oldPhase) {
+          newAlertHistory.unshift({
+            time: new Date().toLocaleTimeString(),
+            symbol, oldPhase, newPhase: phase, price, score: score.toFixed(2)
           });
-        localStorage.setItem('ontraderCache', JSON.stringify(cache));
-        renderAll();
-      } catch(e) {
-        console.error(e);
-        const saved = localStorage.getItem('ontraderCache');
-        if(saved){ cache=JSON.parse(saved); errorBox.innerText='Mostrando datos de caché'; renderAll(); }
-        else { panel.innerHTML=''; errorBox.innerText='Error cargando datos: '+e.message; }
+          newAlertHistory = newAlertHistory.slice(0, 20); // Mantener solo las últimas 20
+        }
+        // Actualizar historia
+        newPrevScores[symbol] = score;
+        newPhaseHistory[symbol] = phase;
+        result.push({
+          symbol, price,
+          score, prevScore,
+          phase
+        });
+      } catch (e) {
+        result.push({
+          symbol,
+          price: 0,
+          score: 0,
+          prevScore,
+          phase: 'No Binance',
+          notradable: true
+        });
       }
+      await sleep(190);
     }
 
-    function renderAll() {
-      const now=Date.now(); alerts=[];
-      cache.forEach(d=>{ d.score=computeScore(d); durations[d.symbol]||={}; if(d.score>=6) durations[d.symbol].bull||=now; else delete durations[d.symbol].bull; if(d.score<=3) durations[d.symbol].bear||=now; else delete durations[d.symbol].bear; const phase=phaseText(d.score); if((d.score>=6||d.score<=3)) alerts.push({time:now,symbol:d.symbol,phase}); });
-      alerts = alerts.filter((v,i,a)=>a.findIndex(x=>x.symbol===v.symbol&&x.phase===v.phase)===i).slice(0,20);
-      const sorted = cache.slice().sort((a,b)=>b.score-a.score);
-      const top10=sorted.slice(0,10), bot10=sorted.slice(-10).reverse();
-      const top5Bearish = cache.filter(d=>phaseText(d.score).includes('Bearish Incline')).sort((a,b)=>a.score-b.score).slice(0,5);
-      const top5Accum = cache.filter(d=>phaseText(d.score).includes('Accumulation')).sort((a,b)=>b.score-a.score).slice(0,5);
-      panel.innerHTML = `<h2>Top 10 Bullish</h2>${makeTable(top10)}<h2>Top 10 Bearish</h2>${makeTable(bot10)}<h2>Top 5 🔴 Bearish Incline</h2>${makeTable(top5Bearish)}<h2>Top 5 🟠 Accumulation</h2>${makeTable(top5Accum)}<h2>Last 20 Alerts</h2>${alertsTable()}`;
-    }
+    // Guardar persistente
+    previousScores = newPrevScores;
+    phaseHistory = newPhaseHistory;
+    alertHistory = newAlertHistory;
+    setLS('ontraderPrevScores', previousScores);
+    setLS('ontraderPhaseHistory', phaseHistory);
+    setLS('ontraderAlertHistory', alertHistory);
 
-    function makeTable(arr) {
-      let html='<table><thead><tr><th>Symbol</th><th>Price</th><th>Score</th><th>Phase</th></tr></thead><tbody>';
-      const now=Date.now(); arr.forEach(d=>{ const s=d.score, txt=s.toFixed(2); const cls=s>=8?'high':s>=5?'mid':'low'; const hl=durations[d.symbol].bull&&now-durations[d.symbol].bull>CONFIG.oneHour?'highlight-bull':durations[d.symbol].bear&&now-durations[d.symbol].bear>CONFIG.oneHour?'highlight-bear':''; html+=`<tr class="${hl}"><td>${d.symbol}</td><td>${d.price.toFixed(6)}</td><td class="${cls}">${txt}</td><td>${phaseText(s)}</td></tr>`; }); return html+'</tbody></table>'; }
-    function alertsTable(){let html='<table><thead><tr><th>Time</th><th>Symbol</th><th>Phase</th></tr></thead><tbody>'; alerts.forEach(a=>html+=`<tr><td>${new Date(a.time).toLocaleTimeString()}</td><td>${a.symbol}</td><td>${a.phase}</td></tr>`); return html+'</tbody></table>';}    
-    let alertTimeout; function showAlert(sym,ph){alertBox.innerText=`🚨 ${sym}: ${ph}`; alertBox.style.display='block'; try{sound.currentTime=0;sound.play();}catch{} clearTimeout(alertTimeout); alertTimeout=setTimeout(()=>{sound.pause();alertBox.style.display='none';},8000);}    
-    loadData(); setInterval(loadData, CONFIG.refreshInterval);
-  </script>
+    renderAll(result);
+    renderAlerts();
+  } catch (e) {
+    errorBox.innerText = 'Error cargando datos: '+e.message;
+  }
+  setTimeout(loadPanel, INTERVAL);
+}
+
+function renderAll(list) {
+  const sorted = list.filter(x=>!x.notradable).sort((a,b)=>b.score-a.score);
+  let html = `<table><thead>
+    <tr><th>Symbol</th><th>Price</th><th>Prev. Score</th><th>Score</th><th>Phase</th></tr>
+    </thead><tbody>`;
+  for (const d of sorted) {
+    const cls = d.score>=8?'high':d.score>=5?'mid':'low';
+    html += `<tr>
+      <td>${d.symbol}</td>
+      <td>${round(d.price)}</td>
+      <td>${Number(d.prevScore).toFixed(2)}</td>
+      <td class="${cls}">${d.score.toFixed(2)}</td>
+      <td>${d.phase}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  panel.innerHTML = html;
+}
+
+function renderAlerts() {
+  if (!alertHistory || alertHistory.length === 0) {
+    alertBox.innerHTML = '';
+    return;
+  }
+  let html = `<table><thead>
+    <tr><th>Time</th><th>Symbol</th><th>Old Phase</th><th>New Phase</th><th>Price</th><th>Score</th></tr>
+    </thead><tbody>`;
+  for (const a of alertHistory) {
+    html += `<tr>
+      <td>${a.time}</td>
+      <td>${a.symbol}</td>
+      <td>${a.oldPhase}</td>
+      <td>${a.newPhase}</td>
+      <td>${round(a.price)}</td>
+      <td>${a.score}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  alertBox.innerHTML = `<b>Last 20 Phase Alerts</b>` + html;
+}
+
+// --- INICIO ---
+loadPanel();
+</script>
 </body>
 </html>
