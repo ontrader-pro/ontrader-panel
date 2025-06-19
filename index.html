@@ -101,7 +101,85 @@
       panel.innerHTML = `<h2>Top 10 Bullish</h2>${makeTable(top)}<h2>Top 10 Bearish</h2>${makeTable(bot)}<h2>Last 20 Alerts</h2>${alertsTable()}`;
     }
 
-    // Continuar refactorizando funciones auxiliares...
+        async function init() {
+      try {
+        const heavy = await loadHeavy();
+        let light = await loadLight(heavy);
+        // compute score and detect alerts
+        processData(light);
+        renderTables(light);
+        // refresh loops
+        setInterval(async () => {
+          light = await loadLight(heavy);
+          processData(light);
+          renderTables(light);
+        }, CONFIG.refreshLight);
+        setInterval(async () => { heavy = await loadHeavy(); }, CONFIG.refreshHeavy);
+      } catch (e) {
+        errorBox.innerText = e.message;
+      }
+    }
+
+    function processData(items) {
+      const now = Date.now();
+      items.forEach(item => {
+        item.score = computeScore(item);
+        const s = item.score;
+        // track durations
+        dur[item.symbol] = dur[item.symbol] || {};
+        if (s >= 6) dur[item.symbol].bullStart = dur[item.symbol].bullStart || now;
+        else delete dur[item.symbol].bullStart;
+        if (s <= 3) dur[item.symbol].bearStart = dur[item.symbol].bearStart || now;
+        else delete dur[item.symbol].bearStart;
+        // detect new alert
+        const phase = s >= 8.1 ? '🟢 Overbought'
+                    : s >= 6   ? '🟡 Bullish Incline'
+                    : s >= 4.9 ? '🟠 Accumulation'
+                    :            '🔴 Bearish Incline';
+        if ((s >= 6 || s <= 3) && !alerts.find(a => a.symbol === item.symbol && a.phase === phase)) {
+          alerts.unshift({ time: now, symbol: item.symbol, phase });
+          if (alerts.length > 20) alerts.pop();
+          showAlert(item.symbol, phase);
+        }
+      });
+    }
+
+    function makeTable(arr) {
+      let html = '<table><thead><tr><th>Symbol</th><th>Price</th><th>Score</th><th>Phase</th></tr></thead><tbody>';
+      const now = Date.now();
+      arr.forEach(d => {
+        const s = d.score.toFixed(2);
+        const phase = s >= 8.1 ? '🟢 Overbought'
+                    : s >= 6   ? '🟡 Bullish Incline'
+                    : s >= 4.9 ? '🟠 Accumulation'
+                    :            '🔴 Bearish Incline';
+        const cls = s >= 8 ? 'high' : s >= 5 ? 'mid' : 'low';
+        const hl = dur[d.symbol].bullStart && now - dur[d.symbol].bullStart > CONFIG.oneHour ? 'highlight-bull'
+                 : dur[d.symbol].bearStart && now - dur[d.symbol].bearStart > CONFIG.oneHour ? 'highlight-bear'
+                 : '';
+        html += `<tr class="${hl}"><td>${d.symbol}</td><td>${d.price.toString()}</td><td class="${cls}">${s}</td><td>${phase}</td></tr>`;
+      });
+      return html + '</tbody></table>';
+    }
+
+    function alertsTable() {
+      let html = '<table id="alerts-table"><thead><tr><th>Time</th><th>Symbol</th><th>Phase</th></tr></thead><tbody>';
+      alerts.forEach(a => {
+        html += `<tr><td>${new Date(a.time).toLocaleTimeString()}</td><td>${a.symbol}</td><td>${a.phase}</td></tr>`;
+      });
+      return html + '</tbody></table>';
+    }
+
+    function showAlert(symbol, phase) {
+      alertBox.innerText = `🚨 ${symbol}: ${phase}`;
+      alertBox.style.display = 'block';
+      try { sound.currentTime = 0; sound.play(); } catch {};
+      setTimeout(() => { sound.pause(); alertBox.style.display = 'none'; }, 8000);
+    }
+
+    // start
+    init();
+  })();
   </script>
 </body>
 </html>
