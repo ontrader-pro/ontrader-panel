@@ -6,13 +6,14 @@
   <style>
     body { background: #101729; color: #fff; font-family: 'Segoe UI', Arial, sans-serif; }
     h1 { color: #25f0ff; text-align: center; }
-    #panel { max-width: 950px; margin: 20px auto; background: #1a223a; border-radius: 8px; box-shadow: 0 2px 14px #2229  }
+    #panel { max-width: 950px; margin: 20px auto; background: #1a223a; border-radius: 8px; box-shadow: 0 2px 14px #2229 }
     table { width: 100%; border-collapse: collapse; margin-bottom: 15px; }
     th, td { padding: 8px; border-bottom: 1px solid #222; text-align: center; }
     th { background: #181e32; color: #25f0ff; }
     .high { color: #00ff91; }
     .low { color: #ff4562; }
     .mid { color: orange; }
+    .section-title {color: #25f0ff; margin: 30px 0 10px 0; font-size: 1.25em; text-align: left;}
     #error { color: #ff4444; text-align: center; }
   </style>
 </head>
@@ -21,18 +22,15 @@
   <div id="panel">Cargando...</div>
   <div id="error"></div>
   <script>
-    // Parámetros principales
-    const TOP_LIMIT = 100; // Top 100 por capitalización
+    const TOP_LIMIT = 100;
     const INTERVAL = "15m";
     const EMA_PERIOD = 28;
     const RSI_PERIOD = 14;
     const STABLES = ['USDT', 'USDC', 'BUSD', 'TUSD', 'DAI', 'USDP', 'GUSD', 'USDN'];
 
-    // Carga previos de localStorage
     let prevScores = JSON.parse(localStorage.getItem('prevScores') || '{}');
     let prevAlerts = JSON.parse(localStorage.getItem('prevAlerts') || '[]');
 
-    // Funciones EMA y RSI
     function ema(arr, period) {
       let k = 2 / (period + 1);
       return arr.reduce((a, v, i) => i ? v * k + a * (1 - k) : v, 0);
@@ -54,8 +52,7 @@
       if (score < 8.1) return '🟡 Bullish Incline';
       return '🟢 Overbought';
     }
-
-    function makeTable(data) {
+    function makeTable(data, limit = 10) {
       let head = `<tr>
         <th>Símbolo</th>
         <th>Último Precio</th>
@@ -63,7 +60,7 @@
         <th>Prev Score</th>
         <th>Phase</th>
       </tr>`;
-      let rows = data.map(row => {
+      let rows = data.slice(0, limit).map(row => {
         let cls = row.score >= 8 ? 'high' : row.score < 4 ? 'low' : 'mid';
         return `<tr>
           <td>${row.symbol}</td>
@@ -75,6 +72,46 @@
       }).join('');
       return `<table>${head}${rows}</table>`;
     }
+    function makeAlertTable(alerts, limit=10) {
+      let head = `<tr>
+        <th>Fecha</th>
+        <th>Símbolo</th>
+        <th>Score Previo</th>
+        <th>Score</th>
+        <th>Phase</th>
+      </tr>`;
+      let rows = alerts.slice(-limit).reverse().map(a => 
+        `<tr>
+          <td>${new Date(a.time).toLocaleString()}</td>
+          <td>${a.symbol}</td>
+          <td>${a.prevScore}</td>
+          <td>${a.score}</td>
+          <td>${a.phase}</td>
+        </tr>`
+      ).join('');
+      return `<table>${head}${rows}</table>`;
+    }
+    function makeChangeTable(changes, limit=10, isUp=true) {
+      let head = `<tr>
+        <th>Símbolo</th>
+        <th>Prev Score</th>
+        <th>Score</th>
+        <th>Diferencia</th>
+        <th>Phase</th>
+      </tr>`;
+      let sorted = changes.slice().sort((a, b) => isUp ? (b.diff - a.diff) : (a.diff - b.diff));
+      let filtered = isUp ? sorted.filter(x => x.diff > 0) : sorted.filter(x => x.diff < 0);
+      let rows = filtered.slice(0, limit).map(row =>
+        `<tr>
+          <td>${row.symbol}</td>
+          <td>${row.prevScore}</td>
+          <td>${row.score}</td>
+          <td>${row.diff > 0 ? '+' : ''}${row.diff}</td>
+          <td>${row.phase}</td>
+        </tr>`
+      ).join('');
+      return `<table>${head}${rows}</table>`;
+    }
 
     async function main() {
       try {
@@ -82,9 +119,7 @@
         document.getElementById('error').textContent = '';
         let res = await fetch('https://fapi.binance.com/fapi/v1/ticker/24hr');
         let tickers = await res.json();
-        console.log("Tickers recibidos:", tickers.length);
-
-        // Filtrar stablecoins
+        // Filtrar stablecoins y USDT only
         tickers = tickers.filter(t =>
           !STABLES.some(stable => t.symbol.endsWith(stable)) &&
           t.symbol.endsWith('USDT')
@@ -112,7 +147,7 @@
             let rsi14 = rsi(closes.slice(-RSI_PERIOD-1), RSI_PERIOD);
             let lastPrice = parseFloat(t.lastPrice);
 
-            // Sunday detection (último domingo en los klines)
+            // Sunday detection
             let minSunday=Infinity, maxSunday=-Infinity;
             let latestSunday=0;
             klines.forEach(arr=>{
@@ -133,11 +168,9 @@
             });
             if(minSunday===Infinity) {
               minSunday = Math.min(...klines.map(a=>parseFloat(a[3])));
-              console.warn("No se encontró minSunday para", symbol, "usa:", minSunday);
             }
             if(maxSunday===-Infinity) {
               maxSunday = Math.max(...klines.map(a=>parseFloat(a[2])));
-              console.warn("No se encontró maxSunday para", symbol, "usa:", maxSunday);
             }
 
             // Score principal
@@ -156,16 +189,12 @@
             let prevScore = prevScores[symbol] || score;
             newPrevScores[symbol] = score;
 
-            // Alerta si cambia la fase
+            // Alerta si cambia el score
             if (prevScore !== score) {
               newAlerts.push({ time: Date.now(), symbol, prevScore, score, phase });
-              if (newAlerts.length > 20) newAlerts = newAlerts.slice(-20);
+              if (newAlerts.length > 50) newAlerts = newAlerts.slice(-50);
             }
 
-            // Log para depuración
-            console.log(`SYM:${symbol} P:${lastPrice} EMA:${ema28.toFixed(4)} RSI:${rsi14.toFixed(2)} MinDom:${minSunday} MaxDom:${maxSunday} SCORE:${score} PHASE:${phase}`);
-
-            // Guardar resultado
             results.push({ symbol, lastPrice, score, prevScore, phase });
 
           } catch(err) {
@@ -177,8 +206,31 @@
         localStorage.setItem('prevScores', JSON.stringify(newPrevScores));
         localStorage.setItem('prevAlerts', JSON.stringify(newAlerts));
 
-        // Renderiza la tabla
-        document.getElementById('panel').innerHTML = makeTable(results);
+        // Top 10 bullish (mayor score)
+        let top10bull = results.slice().sort((a,b)=>b.score-a.score).slice(0,10);
+        // Top 10 bear (menor score)
+        let top10bear = results.slice().sort((a,b)=>a.score-b.score).slice(0,10);
+
+        // Últimas 10 alertas
+        let last10alerts = newAlerts.slice(-10);
+
+        // Top 10 subidas y bajadas de score
+        let scoreChanges = results.map(r=>({ ...r, diff: r.score - r.prevScore }));
+        let top10Up = scoreChanges.filter(x=>x.diff>0).sort((a,b)=>b.diff-a.diff).slice(0,10);
+        let top10Down = scoreChanges.filter(x=>x.diff<0).sort((a,b)=>a.diff-b.diff).slice(0,10);
+
+        document.getElementById('panel').innerHTML = `
+          <div class="section-title">Top 10 Bullish (Score más alto)</div>
+          ${makeTable(top10bull, 10)}
+          <div class="section-title">Top 10 Bearish (Score más bajo)</div>
+          ${makeTable(top10bear, 10)}
+          <div class="section-title">Últimas 10 Alertas de cambio</div>
+          ${makeAlertTable(last10alerts, 10)}
+          <div class="section-title">Top 10 Subidas de Score (Prev Score → Score al alza)</div>
+          ${makeChangeTable(top10Up, 10, true)}
+          <div class="section-title">Top 10 Bajadas de Score (Prev Score → Score a la baja)</div>
+          ${makeChangeTable(top10Down, 10, false)}
+        `;
 
       } catch(e) {
         document.getElementById('panel').innerHTML = '';
