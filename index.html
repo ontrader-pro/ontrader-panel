@@ -116,8 +116,8 @@
       // RSI14
       if(h.rsi14 > 50) score+=1; else if(h.rsi14<50) score-=1;
       score = Math.min(10, Math.max(1, score));
-      let phase = '🔴 Debilidad excesiva';
-      if     (score>=8.1) phase='🟢 Fuerza excesiva';
+      let phase = '🔴 Oversold';
+      if     (score>=8.1) phase='🟢  Overbought';
       else if(score>=6.0) phase='🟡 Bullish Incline';
       else if(score>=4.9) phase='🟠 Accumulation';
       else if(score>=3.1) phase='🔴 Bearish Incline';
