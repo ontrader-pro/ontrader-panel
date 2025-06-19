@@ -1,180 +1,82 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <title>OnTrader Futuros - Score Real</title>
-  <style>
-    body { background: #101729; color: #fff; font-family: 'Segoe UI',sans-serif; margin: 0; }
-    h1 { color: #25f0ff; text-align: center; }
-    #panel { max-width: 1100px; margin: 0 auto; padding: 20px; }
-    .loading { text-align: center; color: #999; padding: 40px; }
-    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
-    th, td { border: 1px solid #2c344b; padding: 7px 5px; text-align: center; }
-    th { background: #1a2233; color: #25f0ff; }
-    .bull { color: #36f076; }
-    .bear { color: #ff4f60; }
-    #error-box { color: #ff6666; text-align: center; }
-    .hidden { display: none; }
-  </style>
-</head>
-<body>
-  <h1>OnTrader Futuros - Score Real (Binance)</h1>
-  <div id="error-box"></div>
-  <div id="panel"><div class="loading">Cargando datos...</div></div>
-  <script>
-    const API_BIN = "https://fapi.binance.com/fapi/v1/ticker/24hr";
-    const API_KLINE = (symbol, interval, limit=30) =>
-      `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const ALLORIGINS = url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-    const STABLES = /USDT$|USDC$|BUSD$|TUSD$|DAI$|USDP$|GUSD$|USDN$|EUR$|FDUSD$/i;
-    const REFRESH_INTERVAL = 180000;
-    const MAX_SYMBOLS = 10; // Cambia a 20 o 50 si tienes buen proxy
+// ... dentro del main() ...
 
-    let errorBox = document.getElementById('error-box');
-    let panel = document.getElementById('panel');
+try {
+  // ...código anterior...
 
-    function calcEMA(prices, period) {
-      const k = 2 / (period + 1);
-      return prices.reduce((acc, val, i) => i === 0 ? val : (val * k + acc * (1 - k)), 0);
+  let res = await fetch('https://fapi.binance.com/fapi/v1/ticker/24hr');
+  let tickers = await res.json();
+  console.log("Tickers recibidos:", tickers.length);
+
+  tickers = tickers.filter(...); // tu filtro de stablecoins
+  tickers = tickers.sort((a,b)=>parseFloat(b.quoteVolume)-parseFloat(a.quoteVolume)).slice(0, TOP_LIMIT);
+
+  let results = [];
+  let newPrevScores = {};
+  let newAlerts = prevAlerts.slice();
+
+  for (let t of tickers) {
+    let symbol = t.symbol;
+    let url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${INTERVAL}&limit=100`;
+    let klineRes = await fetch(url);
+    let klines = await klineRes.json();
+    if (!Array.isArray(klines) || klines.length < 30) {
+      console.warn("No hay suficientes klines para", symbol, klines);
+      continue;
     }
-    function calcRSI(closes, period=14) {
-      let gains = 0, losses = 0;
-      for (let i = 1; i < closes.length; i++) {
-        let diff = closes[i] - closes[i-1];
-        if (diff > 0) gains += diff;
-        else losses -= diff;
+    let closes = klines.map(x=>parseFloat(x[4]));
+    let ema28 = ema(closes.slice(-EMA_PERIOD-1), EMA_PERIOD);
+    let rsi14 = rsi(closes.slice(-RSI_PERIOD-1), RSI_PERIOD);
+    let lastPrice = parseFloat(t.lastPrice);
+
+    // Sunday detection
+    let minSunday=Infinity, maxSunday=-Infinity;
+    let latestSunday=0;
+    klines.forEach(arr=>{
+      let ts = arr[0];
+      let date = new Date(ts);
+      if(date.getUTCDay()===0 && date.getTime()>latestSunday){
+        latestSunday = date.setUTCHours(0,0,0,0);
       }
-      let avgGain = gains / period;
-      let avgLoss = losses / period || 1e-6;
-      let rs = avgGain / avgLoss;
-      return 100 - (100 / (1 + rs));
-    }
-
-    // Nueva función robusta:
-    async function fetchRobust(url, tryProxy=true) {
-      try {
-        let resp = await fetch(url);
-        let txt = await resp.text();
-        let data;
-        try { data = JSON.parse(txt); } catch { data = txt; }
-        if (typeof data === 'object' && (Array.isArray(data) || data !== null)) return data;
-        if (typeof data === 'string' && data.startsWith('[')) return JSON.parse(data);
-        if (!tryProxy) throw new Error('API response not valid');
-      } catch (err) {
-        if (!tryProxy) throw err;
-        // Si falla, intentar con proxy:
-        try {
-          let resp = await fetch(ALLORIGINS(url));
-          let txt = await resp.text();
-          let data;
-          try { data = JSON.parse(txt); } catch { data = txt; }
-          if (typeof data === 'object' && (Array.isArray(data) || data !== null)) return data;
-          if (typeof data === 'string' && data.startsWith('[')) return JSON.parse(data);
-          throw new Error('API (proxy) response not valid');
-        } catch (proxyErr) {
-          throw new Error('API y proxy fallaron: ' + proxyErr.message);
-        }
+    });
+    klines.forEach(arr=>{
+      let ts = arr[0];
+      let date = new Date(ts);
+      if(date.getUTCDay()===0 && date.setUTCHours(0,0,0,0)===latestSunday){
+        let low = parseFloat(arr[3]), high = parseFloat(arr[2]);
+        if(low<minSunday) minSunday=low;
+        if(high>maxSunday) maxSunday=high;
       }
+    });
+    if(minSunday===Infinity) {
+      minSunday = Math.min(...klines.map(a=>parseFloat(a[3])));
+      console.warn("No se encontró minSunday para", symbol, "usa:", minSunday);
+    }
+    if(maxSunday===-Infinity) {
+      maxSunday = Math.max(...klines.map(a=>parseFloat(a[2])));
+      console.warn("No se encontró maxSunday para", symbol, "usa:", maxSunday);
     }
 
-    function calcScore(params) {
-      let score = 1;
-      if (params.lastPrice > params.minSunday) score += 3;
-      if (params.lastPrice > params.maxSunday) score += 2;
-      if (params.rsi15m > 50 && params.lastPrice > params.ema15m) score += 2;
-      if (params.rsi15m < 50 && params.lastPrice < params.ema15m) score -= 2;
-      if (params.rsi5m > 70 && params.lastPrice > params.ema5m) score += 1;
-      if (params.rsi5m < 30 && params.lastPrice < params.ema5m) score -= 1;
-      if (params.rsi4m < 15) score += 0.5;
-      if (params.rsi4m > 85) score -= 0.5;
-      score = Math.max(1, Math.min(10, score));
-      return Math.round(score*100)/100;
-    }
-    function phase(score) {
-      if (score >= 8.1) return '🟢 Overbought';
-      if (score >= 6.0) return '🟡 Bullish Incline';
-      if (score >= 4.9) return '🟠 Accumulation';
-      if (score >= 3.1) return '🔴 Bearish Incline';
-      return '🔴 Oversold';
-    }
+    // Score
+    let score = 1;
+    if(lastPrice > minSunday) score+=3;
+    if(lastPrice > ema28) score+=2;
+    if(rsi14 > 55) score+=2;
+    if(lastPrice < ema28) score-=2;
+    if(rsi14 < 45) score-=2;
+    if(lastPrice > maxSunday) score+=2;
+    if(lastPrice < minSunday) score-=2;
+    score = Math.max(1, Math.min(10, score));
+    let phase = getPhase(score);
 
-    async function loadAll() {
-      panel.innerHTML = '<div class="loading">Cargando top símbolos de futuros...</div>';
-      errorBox.textContent = '';
-      let tickers = [];
-      try {
-        tickers = await fetchRobust(API_BIN, true);
-        if (!Array.isArray(tickers)) throw new Error("tickers.filter is not a function. Respuesta: " + JSON.stringify(tickers).slice(0,200));
-      } catch (e) {
-        panel.innerHTML = '';
-        errorBox.textContent = 'Error cargando datos: ' + e.message;
-        return;
-      }
+    // Logs para depuración:
+    console.log(`SYM:${symbol} P:${lastPrice} EMA:${ema28.toFixed(4)} RSI:${rsi14.toFixed(2)} MinDom:${minSunday} MaxDom:${maxSunday} SCORE:${score} PHASE:${phase}`);
 
-      // Filtrar futuros no stables
-      let onlyFutures = tickers.filter(x=>
-        !x.symbol.match(STABLES) &&
-        x.symbol.endsWith("USDT") &&
-        /^[A-Z0-9]{3,}USDT$/.test(x.symbol)
-      );
-      onlyFutures = onlyFutures.sort((a,b)=>b.quoteVolume-a.quoteVolume).slice(0,MAX_SYMBOLS);
+    // ...resto igual...
+  }
 
-      let results = [];
-      for (let obj of onlyFutures) {
-        let params = { lastPrice: Number(obj.lastPrice), symbol: obj.symbol };
-        params.minSunday = Number(obj.lowPrice); // Debe ser el del domingo real
-        params.maxSunday = Number(obj.highPrice);
-
-        try {
-          let klines15 = await fetchRobust(API_KLINE(obj.symbol, '15m', 30), true);
-          let closes15 = klines15.map(x=>Number(x[4]));
-          params.ema15m = calcEMA(closes15.slice(-28), 28);
-          params.rsi15m = calcRSI(closes15.slice(-15), 14);
-
-          let klines5 = await fetchRobust(API_KLINE(obj.symbol, '5m', 30), true);
-          let closes5 = klines5.map(x=>Number(x[4]));
-          params.ema5m = calcEMA(closes5.slice(-28), 28);
-          params.rsi5m = calcRSI(closes5.slice(-15), 14);
-
-          let klines4 = await fetchRobust(API_KLINE(obj.symbol, '4m', 30), true);
-          let closes4 = klines4.map(x=>Number(x[4]));
-          params.rsi4m = calcRSI(closes4.slice(-15), 14);
-
-        } catch(e) {
-          errorBox.textContent = 'Error en símbolo ' + obj.symbol + ': ' + e.message;
-          continue;
-        }
-        params.score = calcScore(params);
-        params.phase = phase(params.score);
-        results.push(params);
-      }
-
-      let bull = [...results].sort((a,b)=>b.score-a.score).slice(0,10);
-      let bear = [...results].sort((a,b)=>a.score-b.score).slice(0,10);
-
-      let mkTable = arr => `<table><thead>
-        <tr><th>Símbolo</th><th>Precio</th><th>Fase</th><th>Score</th></tr>
-        </thead><tbody>` +
-        arr.map(d=>`<tr>
-          <td>${d.symbol}</td>
-          <td>${d.lastPrice.toFixed(6)}</td>
-          <td>${d.phase}</td>
-          <td>${d.score.toFixed(2)}</td>
-        </tr>`).join('') + '</tbody></table>';
-
-      panel.innerHTML = `
-        <h2>Top 10 Alcista</h2>
-        ${mkTable(bull)}
-        <h2>Top 10 Bajista</h2>
-        ${mkTable(bear)}
-        <div style="color:#888;font-size:11px;padding:10px;">Actualizado: ${new Date().toLocaleTimeString()} - Real Data Binance Futuros</div>
-      `;
-      // Logs
-      console.log('Resultados:', results);
-    }
-
-    loadAll();
-    setInterval(loadAll, REFRESH_INTERVAL);
-  </script>
-</body>
-</html>
+  // ...el resto del código igual...
+} catch(e) {
+  document.getElementById('panel').innerHTML = '';
+  document.getElementById('error').textContent = 'Error cargando datos: '+(e.message||e);
+  console.error("ERROR GLOBAL:", e);
+}
