@@ -212,4 +212,110 @@ async function loadAndRenderBatchedFast() {
     showProgress(`Loaded 20/${symbols.length}...`);
 
     // --- Rest of batches (in the background, less aggressive) ---
-    for (let start=BATCH_SIZE; start<symbol_
+    for (let start=BATCH_SIZE; start<symbols.length; start+=BATCH_SIZE) {
+      let tasks = [];
+      for (let i=start; i<start+BATCH_SIZE && i<symbols.length; ++i) {
+        loadingStep++;
+        tasks.push(processSymbol(i));
+      }
+      let partial = await Promise.all(tasks);
+      dataArr = dataArr.concat(partial);
+      cache = dataArr.slice();
+      renderTables();
+      showProgress(`Loaded ${Math.min(loadingStep,symbols.length)}/${symbols.length}...`);
+      await sleep(600); // Prevent API throttling, tweak if needed
+    }
+
+    // --- Save cache ---
+    localStorage.setItem('ontrader-score-prev', JSON.stringify(scoreMapPrev));
+    localStorage.setItem('ontrader-latest', JSON.stringify(dataArr));
+    hideProgress();
+
+  } catch(e) {
+    showError("Error loading data: " + e.message);
+    log(e);
+    let backup = localStorage.getItem('ontrader-latest');
+    if (backup) {
+      cache = JSON.parse(backup);
+      renderTables();
+      hideProgress();
+    }
+  }
+}
+
+function renderTables() {
+  let sorted = cache.slice().sort((a,b)=>b.score-a.score);
+  let top10Bull = sorted.slice(0,10);
+  let top10Bear = sorted.slice(-10).reverse();
+
+  let ups = cache
+    .filter(x=>x.scorePrev!==null)
+    .map(x=>({ ...x, diff: x.score-x.scorePrev }))
+    .filter(x=>x.diff>0)
+    .sort((a,b)=>b.diff-a.diff)
+    .slice(0,10);
+
+  let downs = cache
+    .filter(x=>x.scorePrev!==null)
+    .map(x=>({ ...x, diff: x.score-x.scorePrev }))
+    .filter(x=>x.diff<0)
+    .sort((a,b)=>a.diff-b.diff)
+    .slice(0,10);
+
+  let last20alerts = alerts.slice(-20);
+
+  panel.innerHTML = `
+  <h2>Top 10 Bullish</h2>
+  ${makeTable(top10Bull)}
+  <h2>Top 10 Bearish</h2>
+  ${makeTable(top10Bear)}
+  <h2>Top 10 Score Up Changes</h2>
+  ${makeTable(ups,true)}
+  <h2>Top 10 Score Down Changes</h2>
+  ${makeTable(downs,true)}
+  <h2>Last 20 Alerts</h2>
+  ${alertsTable(last20alerts)}
+  `;
+}
+
+function makeTable(arr, showDiff=false) {
+  let html = `<table><thead><tr>
+    <th>Symbol</th><th>Price</th><th>Score</th><th>Prev. Score</th>${showDiff?'<th>Change</th>':''}<th>Phase</th>
+    </tr></thead><tbody>`;
+  for(let d of arr) {
+    let cls = d.score>=8?'high':d.score>=5?'mid':'low';
+    let rowCls = '';
+    if (d.phase.includes('Bullish')) rowCls = 'bullish';
+    if (d.phase.includes('Bearish')) rowCls = 'bearish';
+    if (showDiff && d.diff>0) rowCls += ' change-up';
+    if (showDiff && d.diff<0) rowCls += ' change-down';
+    html += `<tr class="${rowCls}"><td>${d.symbol}</td>
+    <td>${d.lastPrice.toFixed(6)}</td>
+    <td class="${cls}">${d.score.toFixed(2)}</td>
+    <td>${d.scorePrev!==null?d.scorePrev.toFixed(2):'—'}</td>
+    ${showDiff?`<td>${d.diff>0?'+':''}${d.diff.toFixed(2)}</td>`:''}
+    <td>${d.phase}</td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  return html;
+}
+function alertsTable(arr) {
+  let html = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Score</th><th>Prev. Score</th><th>Phase</th></tr></thead><tbody>`;
+  for(let a of arr) {
+    html += `<tr><td>${new Date(a.time).toLocaleTimeString()}</td>
+    <td>${a.symbol}</td>
+    <td>${a.score.toFixed(2)}</td>
+    <td>${a.scorePrev!==null?a.scorePrev.toFixed(2):'—'}</td>
+    <td>${a.phase}</td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  return html;
+}
+
+// Start!
+loadAndRenderBatchedFast();
+  </script>
+</body>
+</html>
