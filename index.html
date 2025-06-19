@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OnTrader Index Panel</title>
   <style>
-    :root { --main: #25f0ff; --bg: #101729; --bg-hover: #080d18; }
+    :root { --main: #25f0ff; --bg: #101729; --highlight-bull: rgba(0,255,0,0.2); --highlight-bear: rgba(255,0,0,0.2); }
     body { background: var(--bg); color: #fff; font-family: sans-serif; margin: 0; padding: 20px; }
     h1 { text-align: center; color: var(--main); margin-bottom: 5px; }
     #formula { text-align: center; color: #aaa; margin-bottom: 15px; font-size: 0.9em; }
@@ -15,10 +15,10 @@
     .high { color: limegreen; font-weight: bold; }
     .mid  { color: orange;    font-weight: bold; }
     .low  { color: red;       font-weight: bold; }
-    .highlight-bull { background: rgba(0,255,0,0.2); }
-    .highlight-bear { background: rgba(255,0,0,0.2); }
-    #alert-box { position: fixed; bottom: 20px; right: 20px; background: #ff4444; color: #fff; padding: 10px 15px; border-radius: 5px; display: none; box-shadow: 0 0 6px rgba(0,0,0,0.5); z-index: 1000; }
-    #error-box { color: #f55; font-weight: bold; margin-top: 10px; }
+    .highlight-bull { background: var(--highlight-bull); }
+    .highlight-bear { background: var(--highlight-bear); }
+    #alert-box { position: fixed; bottom: 20px; right: 20px; background: #ff4444; color: #fff; padding: 10px 15px; border-radius: 5px; display: none; box-shadow: 0 0 6px rgba(0,0,0,0.5); }
+    #error-box { color: #f55; font-weight: bold; margin-top: 10px; text-align: center; }
   </style>
 </head>
 <body>
@@ -29,157 +29,145 @@
   <div id="alert-box"></div>
 
   <script>
-    // 1. Extraer selectores de DOM a constantes para evitar búsquedas repetidas
+    // DOM selectors
     const panel = document.getElementById('panel');
     const errorBox = document.getElementById('error-box');
     const alertBox = document.getElementById('alert-box');
     const sound = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
 
-    window.onerror = (msg) => {
-      errorBox.innerText = 'Error: ' + msg;
-      return true;
-    };
+    window.onerror = msg => { errorBox.innerText = 'Error: ' + msg; return true; };
     if (typeof fetch !== 'function') {
       panel.innerText = 'Abra en un navegador real.';
       throw new Error('Entorno no válido');
     }
 
-    // 2. Usar nombres más descriptivos y agrupar constantes
-    const API = {
+    // Config
+    const API = { 
       coingecko: 'https://api.coingecko.com/api/v3',
       proxy: url => 'https://thingproxy.freeboard.io/fetch/' + url
     };
-    const CONFIG = { stables: ['usdt','usdc','busd','dai','tusd','usdp','gusd','usdn'], perPage: 250, pages: 4, refreshHeavy:120e3, refreshLight:60e3, oneHour:3600e3 };
+    const CONFIG = {
+      stables: ['usdt','usdc','busd','dai','tusd','usdp','gusd','usdn'],
+      perPage: 250, pages: 4,
+      refreshHeavy: 120e3, refreshLight: 60e3,
+      oneHour: 3600e3
+    };
 
-    // 3. Simplificar cálculos con funciones puras
-    function calcEMA(arr,p){ const k=2/(p+1); return arr.reduce((a,v,i)=>i?v*k+a*(1-k):v,0); }
-    function calcRSI(arr){ let gain=0,loss=0; for(let i=1;i<arr.length;i++){const d=arr[i]-arr[i-1]; d>0?gain+=d:loss-=d;} const ag=gain/(arr.length-1), al=loss/(arr.length-1)||1e-6; const rs=ag/al; return 100-(100/(1+rs)); }
+    // Indicators
+    function calcEMA(arr, p){ const k = 2/(p+1); return arr.reduce((a,v,i)=>i?v*k+a*(1-k):v,0); }
+    function calcRSI(a){ let g=0,l=0; for(let i=1;i<a.length;i++){ const d=a[i]-a[i-1]; d>0?g+=d:l-=d;} const ag=g/(a.length-1), al=l/(a.length-1)||1e-6, rs=ag/al; return 100-(100/(1+rs)); }
 
-    // 4. Unificar lógica de puntuación en función clara
+    // Score formula
     function computeScore({price,minD,ema28,rsi14}){
       const x1 = price < minD;
       const x2 = price < ema28;
       const x3 = rsi14 < 50;
       const x4 = rsi14 < 30;
       const raw = 1 + 2*x1 + 2*x2 + 3*x3 + 2*x4;
-      return Math.max(1, Math.min(10, raw));
+      return Math.min(10, Math.max(1, raw));
     }
 
-    // 5. Modularizar carga de datos y renderizado (evitar función gigante)
+    // Data loaders
     async function loadHeavy(){
       const now = Date.now();
       if (loadHeavy.cache && now - loadHeavy.ts < CONFIG.refreshHeavy) return loadHeavy.cache;
       loadHeavy.ts = now;
       const coins = [];
-      for (let pg = 1; pg <= CONFIG.pages; pg++) {
-        try {
+      for(let pg=1;pg<=CONFIG.pages;pg++){
+        try{
           const res = await fetch(`${API.coingecko}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${CONFIG.perPage}&page=${pg}&sparkline=true`);
           const list = await res.json();
-          list.forEach(c => {
-            if (CONFIG.stables.includes(c.symbol)) return;
-            const prices = Array.isArray(c.sparkline_in_7d?.price) ? c.sparkline_in_7d.price : [];
-            const ema28 = prices.length>=28 ? calcEMA(prices.slice(-28),28) : c.current_price;
-            const rsi14 = prices.length>=15 ? calcRSI(prices.slice(-15)) : 50;
-            coins.push({ id:c.id, symbol:c.symbol.toUpperCase(), ema28, rsi14, priceHistory: prices });
+          list.forEach(c=>{
+            if(CONFIG.stables.includes(c.symbol)) return;
+            const sp = Array.isArray(c.sparkline_in_7d?.price) ? c.sparkline_in_7d.price : [];
+            coins.push({
+              id: c.id,
+              symbol: c.symbol.toUpperCase(),
+              ema28: sp.length>=28 ? calcEMA(sp.slice(-28),28) : c.current_price,
+              rsi14: sp.length>=15 ? calcRSI(sp.slice(-15)) : 50
+            });
           });
-        } catch (e) { console.warn('Heavy load error', e); }
+        }catch(e){ console.warn('Heavy load error',e); }
       }
-      loadHeavy.cache = coins;
-      return coins;
+      return (loadHeavy.cache = coins);
     }
 
     async function loadLight(coins){
-      const ids = coins.map(c=>c.id).join(',');
+      const ids = coins.map(x=>x.id).join(',');
       const res = await fetch(`${API.coingecko}/simple/price?ids=${ids}&vs_currencies=usd`);
       const prices = await res.json();
-      return coins.map(c => ({ ...c, price: prices[c.id]?.usd || 0 }));
+      return coins.map(c=>({
+        ...c,
+        price: prices[c.id]?.usd||0
+      }));
     }
 
-    function renderTables(data){
-      const top = data.slice().sort((a,b)=>b.score-a.score).slice(0,10);
-      const bot = data.slice().sort((a,b)=>a.score-b.score).slice(0,10);
-      panel.innerHTML = `<h2>Top 10 Bullish</h2>${makeTable(top)}<h2>Top 10 Bearish</h2>${makeTable(bot)}<h2>Last 20 Alerts</h2>${alertsTable()}`;
-    }
-
-        async function init() {
-      try {
-        const heavy = await loadHeavy();
-        let light = await loadLight(heavy);
-        // compute score and detect alerts
-        processData(light);
-        renderTables(light);
-        // refresh loops
-        setInterval(async () => {
-          light = await loadLight(heavy);
-          processData(light);
-          renderTables(light);
+    // Process & render
+    async function init(){
+      try{
+        let heavy = await loadHeavy();
+        let items = await loadLight(heavy);
+        processData(items);
+        renderTables(items);
+        setInterval(async()=>{
+          items = await loadLight(heavy);
+          processData(items); renderTables(items);
         }, CONFIG.refreshLight);
-        setInterval(async () => { heavy = await loadHeavy(); }, CONFIG.refreshHeavy);
-      } catch (e) {
-        errorBox.innerText = e.message;
-      }
+        setInterval(async()=>{ heavy = await loadHeavy(); }, CONFIG.refreshHeavy);
+      }catch(e){ errorBox.innerText = e.message; }
     }
 
-    function processData(items) {
+    const dur = {}, alerts = [];
+    function processData(arr){
       const now = Date.now();
-      items.forEach(item => {
-        item.score = computeScore(item);
-        const s = item.score;
-        // track durations
-        dur[item.symbol] = dur[item.symbol] || {};
-        if (s >= 6) dur[item.symbol].bullStart = dur[item.symbol].bullStart || now;
-        else delete dur[item.symbol].bullStart;
-        if (s <= 3) dur[item.symbol].bearStart = dur[item.symbol].bearStart || now;
-        else delete dur[item.symbol].bearStart;
-        // detect new alert
-        const phase = s >= 8.1 ? '🟢 Overbought'
-                    : s >= 6   ? '🟡 Bullish Incline'
-                    : s >= 4.9 ? '🟠 Accumulation'
-                    :            '🔴 Bearish Incline';
-        if ((s >= 6 || s <= 3) && !alerts.find(a => a.symbol === item.symbol && a.phase === phase)) {
-          alerts.unshift({ time: now, symbol: item.symbol, phase });
-          if (alerts.length > 20) alerts.pop();
-          showAlert(item.symbol, phase);
+      arr.forEach(d=>{
+        d.score = computeScore(d);
+        if(d.score>=6) dur[d.symbol].b = dur[d.symbol].b||now; else delete dur[d.symbol].b;
+        if(d.score<=3) dur[d.symbol].s = dur[d.symbol].s||now; else delete dur[d.symbol].s;
+        const phase = d.score>=8.1? '🟢 Overbought' : d.score>=6? '🟡 Bullish Incline' : d.score>=4.9? '🟠 Accumulation' : '🔴 Bearish Incline';
+        if((d.score>=6||d.score<=3) && !alerts.find(a=>a.symbol===d.symbol&&a.phase===phase)){
+          alerts.unshift({time: now, symbol:d.symbol, phase}); if(alerts.length>20)alerts.pop(); showAlert(d.symbol, phase);
         }
       });
     }
 
-    function makeTable(arr) {
+    function renderTables(arr){
+      const top = arr.slice().sort((a,b)=>b.score-a.score).slice(0,10);
+      const bot = arr.slice().sort((a,b)=>a.score-b.score).slice(0,10);
+      panel.innerHTML =
+        `<h2>Top 10 Bullish</h2>${makeTable(top)}` +
+        `<h2>Top 10 Bearish</h2>${makeTable(bot)}` +
+        `<h2>Last 20 Alerts</h2>${alertsTable()}`;
+    }
+
+    function makeTable(list){
       let html = '<table><thead><tr><th>Symbol</th><th>Price</th><th>Score</th><th>Phase</th></tr></thead><tbody>';
-      const now = Date.now();
-      arr.forEach(d => {
-        const s = d.score.toFixed(2);
-        const phase = s >= 8.1 ? '🟢 Overbought'
-                    : s >= 6   ? '🟡 Bullish Incline'
-                    : s >= 4.9 ? '🟠 Accumulation'
-                    :            '🔴 Bearish Incline';
-        const cls = s >= 8 ? 'high' : s >= 5 ? 'mid' : 'low';
-        const hl = dur[d.symbol].bullStart && now - dur[d.symbol].bullStart > CONFIG.oneHour ? 'highlight-bull'
-                 : dur[d.symbol].bearStart && now - dur[d.symbol].bearStart > CONFIG.oneHour ? 'highlight-bear'
-                 : '';
+      const now=Date.now();
+      list.forEach(d=>{
+        const s=d.score.toFixed(2);
+        const cls = s>=8?'high':s>=5?'mid':'low';
+        const hl = dur[d.symbol].b&&now-dur[d.symbol].b>CONFIG.oneHour?'highlight-bull': dur[d.symbol].s&&now-dur[d.symbol].s>CONFIG.oneHour?'highlight-bear':'';
+        const phase = s>=8.1? '🟢 Overbought' : s>=6? '🟡 Bullish Incline' : s>=4.9? '🟠 Accumulation' : '🔴 Bearish Incline';
         html += `<tr class="${hl}"><td>${d.symbol}</td><td>${d.price.toString()}</td><td class="${cls}">${s}</td><td>${phase}</td></tr>`;
       });
       return html + '</tbody></table>';
     }
 
-    function alertsTable() {
-      let html = '<table id="alerts-table"><thead><tr><th>Time</th><th>Symbol</th><th>Phase</th></tr></thead><tbody>';
-      alerts.forEach(a => {
-        html += `<tr><td>${new Date(a.time).toLocaleTimeString()}</td><td>${a.symbol}</td><td>${a.phase}</td></tr>`;
-      });
+    function alertsTable(){
+      let html = '<table><thead><tr><th>Time</th><th>Symbol</th><th>Phase</th></tr></thead><tbody>';
+      alerts.forEach(a=> html+=`<tr><td>${new Date(a.time).toLocaleTimeString()}</td><td>${a.symbol}</td><td>${a.phase}</td></tr>`);
       return html + '</tbody></table>';
     }
 
-    function showAlert(symbol, phase) {
-      alertBox.innerText = `🚨 ${symbol}: ${phase}`;
+    function showAlert(sym,ph){
+      alertBox.innerText = `🚨 ${sym}: ${ph}`;
       alertBox.style.display = 'block';
-      try { sound.currentTime = 0; sound.play(); } catch {};
-      setTimeout(() => { sound.pause(); alertBox.style.display = 'none'; }, 8000);
+      try{ sound.currentTime=0; sound.play(); }catch{}
+      setTimeout(()=>{ sound.pause(); alertBox.style.display='none'; },8000);
     }
 
-        // start initialization
+    // Start
     init();
-  });
   </script>
 </body>
 </html>
