@@ -1,134 +1,100 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Índice OnTrader</title>
-  <style>
-    body { background:#101729; color:#fff; font-family:sans-serif; margin:0; padding:20px }
-    h1 { text-align:center; color:#25f0ff }
-    #filtros { display:flex; justify-content:center; gap:10px; flex-wrap:wrap; margin:15px 0 }
-    #panel { overflow-x:auto }
-    table { width:100%; border-collapse:collapse }
-    th,td { border:1px solid #333; padding:6px; text-align:center; min-width:80px }
-    thead { background:#1f2a44; color:#25f0ff }
-    .high { color:limegreen; font-weight:bold }
-    .mid  { color:orange;    font-weight:bold }
-    .low  { color:red;       font-weight:bold }
-    #alerta {
-      position:fixed; bottom:20px; right:20px;
-      background:#ff4444; color:#fff;
-      padding:10px 15px; border-radius:5px;
-      display:none; box-shadow:0 0 6px rgba(0,0,0,0.5);
-      z-index:1000;
-    }
-  </style>
-</head>
-<body>
-  <h1>Índice OnTrader</h1>
-  <div id="filtros">
-    <input id="buscar" placeholder="Buscar cripto…" />
-    <select id="orden">
-      <option value="desc">Mayor Índice</option>
-      <option value="asc">Menor Índice</option>
-    </select>
-  </div>
-  <div id="panel">Cargando datos…</div>
-  <div id="alerta"></div>
-
-  <script>
-  // 250 criptos CoinGecko (por volumen)
-  const URL = 'https://api.coingecko.com/api/v3/coins/markets'
-    + '?vs_currency=usd&order=market_cap_desc&per_page=250&page=1&sparkline=true';
-
-  const domingo = {}; // si tienes máximos/mínimos dom. ponlos aquí: domingo["BTC"]= {max:...,min:...}, etc.
+<script>
+  const pares = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"];
+  // Proxy CORS para Binance
+  const proxy = url => 'https://thingproxy.freeboard.io/fetch/' + url;
+  
   let dataGlobal = [], alerted = new Set();
 
-  // EMA 28 y RSI 14
-  function calcEMA(vals,p){
-    const k=2/(p+1);
-    return vals.reduce((a,v,i)=>i? v*k + a*(1-k): v, 0);
-  }
-  function calcRSI(arr){
-    let g=0,l=0;
-    for(let i=1;i<arr.length;i++){
-      const d=arr[i]-arr[i-1];
-      if(d>0) g+=d; else l-=d;
-    }
-    const avgG=g/(arr.length-1), avgL=l/(arr.length-1)||1e-6, rs=avgG/avgL;
-    return 100-(100/(1+rs));
+  // Obtiene para un par el max/min de la vela diaria de domingo
+  async function obtenerDomingo(par) {
+    // Trae las últimas 8 velas diarias
+    const url = `https://api.binance.com/api/v3/klines?symbol=${par}&interval=1d&limit=8`;
+    const klines = await fetch(proxy(url)).then(r=>r.json());
+    // Busca la más reciente cuyo getUTCDay()===0 (domingo UTC)
+    const domingoK = klines.reverse().find(k => new Date(k[0]).getUTCDay() === 0);
+    return {
+      max: domingoK ? parseFloat(domingoK[2]) : NaN,
+      min: domingoK ? parseFloat(domingoK[3]) : NaN
+    };
   }
 
-  async function actualizar(){
-    document.getElementById('panel').innerText = 'Cargando…';
-    const res = await fetch(URL);
-    const arr = await res.json(); // cada item -> {id,symbol,current_price,sparkline_in_7d:{price:[]}}
-    dataGlobal = arr.map(c=> {
-      const closes = c.sparkline_in_7d.price.slice(-28);
-      const ema = calcEMA(closes,28);
-      const rsi = calcRSI(c.sparkline_in_7d.price.slice(-15));
-      const precio = c.current_price;
-      // Lógica OnTrader oculta (máx/min domingo si tienes):
-      const dom = domingo[c.symbol.toUpperCase()]||{};
-      let score=0;
-      if(dom.min && precio>dom.min) score+=1;
-      if(dom.max && dom.min && precio>(dom.min+dom.max)/2) score+=2;
-      if(dom.max && precio>dom.max) score+=2;
-      if(dom.min && precio<dom.min) score+=2;
-      if((precio%1)<0.2) score+=1;
-      if(precio>ema) score+=2;
-      if(rsi>60||rsi<40) score+=2.5;
-      score = Math.min(10, Math.max(1, score));
-      const alerta = score>=7 ? `🚨 ${c.symbol.toUpperCase()} Índice ${score}` : '-';
-      return {
-        cripto: c.symbol.toUpperCase(),
-        precio,
-        indice: score,
-        alerta
-      };
-    });
+  async function actualizar() {
+    const resultados = [];
+    for (let par of pares) {
+      try {
+        // 1) Precio actual
+        const p     = await fetch(proxy(`https://api.binance.com/api/v3/ticker/price?symbol=${par}`)).then(r=>r.json());
+        const precio= parseFloat(p.price);
+
+        // 2) Velas horarias para EMA/RSI
+        const klH   = await fetch(proxy(`https://api.binance.com/api/v3/klines?symbol=${par}&interval=1h&limit=15`))
+                              .then(r=>r.json());
+        const cierres = klH.map(k=>parseFloat(k[4]));
+
+        // 3) EMA28 y RSI14
+        const ema = calcEMA(cierres.slice(-28), 28);
+        const rsi = calcRSI(cierres);
+
+        // 4) MÁX / MÍN de domingo
+        const {max, min} = await obtenerDomingo(par);
+
+        // 5) Cálculo del Índice OnTrader
+        let score = 0;
+        if (precio > min) score += 1;
+        if (precio > (min + max)/2) score += 2;
+        if (precio > max) score += 2;
+        if (precio < min) score += 2;
+        if ((precio % 1) < 0.2) score += 1;
+        if (precio > ema) score += 2;
+        if (rsi > 60 || rsi < 40) score += 2.5;
+        score = Math.min(10, Math.max(1, score));
+
+        // 6) Alerta
+        const alerta = score >= 7
+          ? `🚨 ${par.replace('USDT','')} Índice ${score}`
+          : '-';
+
+        resultados.push({
+          cripto: par.replace('USDT',''),
+          precio,
+          indice: score,
+          alerta
+        });
+      } catch(e) {
+        console.warn('Error con', par, e);
+      }
+    }
+    dataGlobal = resultados;
     renderTabla();
     mostrarAlerta();
   }
 
-  function renderTabla(){
-    const ord = document.getElementById('orden').value;
-    const bus = document.getElementById('buscar').value.toLowerCase();
-    let arr = dataGlobal.filter(d=>d.cripto.toLowerCase().includes(bus));
-    arr.sort((a,b)=> ord==='desc'? b.indice-a.indice : a.indice-b.indice);
-    let html=`<table><thead>
-      <tr><th>Cripto</th><th>Precio</th><th>Índice</th><th>Alerta</th></tr>
-    </thead><tbody>`;
-    for(let d of arr){
-      const cls = d.indice>=8?'high': d.indice>=5?'mid':'low';
-      html+=`<tr>
-        <td>${d.cripto}</td>
-        <td>${d.precio.toLocaleString()}</td>
-        <td class="${cls}">${d.indice}</td>
-        <td>${d.alerta}</td>
-      </tr>`;
-    }
-    html+=`</tbody></table>`;
-    document.getElementById('panel').innerHTML = html;
+  function calcEMA(vals, period) {
+    const k = 2/(period + 1);
+    return vals.reduce((acc, v, i) => i
+      ? v*k + acc*(1-k)
+      : v
+    );
   }
 
-  function mostrarAlerta(){
-    const el = document.getElementById('alerta');
-    const n = dataGlobal.find(d=>d.indice>=7 && !alerted.has(d.cripto));
-    if(n){
-      alerted.add(n.cripto);
-      el.innerText = n.alerta;
-      el.style.display = 'block';
-      new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play();
-      setTimeout(()=> el.style.display='none',10000);
+  function calcRSI(arr) {
+    let gains=0, losses=0;
+    for (let i=1; i<arr.length; i++){
+      const d = arr[i] - arr[i-1];
+      if (d>0) gains += d;
+      else losses -= d;
     }
+    const avgG = gains/(arr.length-1);
+    const avgL = losses/(arr.length-1) || 1e-6;
+    const rs = avgG/avgL;
+    return 100 - (100/(1+rs));
   }
 
+  // renderTabla() y mostrarAlerta() quedan igual…
   document.getElementById('buscar').addEventListener('input', renderTabla);
   document.getElementById('orden').addEventListener('change', renderTabla);
 
+  // Primera carga
   actualizar();
-  setInterval(actualizar,30000);
-  </script>
-</body>
-</html>
+  setInterval(actualizar, 30000);
+</script>
