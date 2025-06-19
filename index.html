@@ -5,11 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OnTrader Index Panel</title>
   <style>
-    :root {
-      --main: #25f0ff;
-      --bg: #101729;
-      --bg-hover: #080d18;
-    }
+    :root { --main: #25f0ff; --bg: #101729; --bg-hover: #080d18; }
     body { background: var(--bg); color: #fff; font-family: sans-serif; margin: 0; padding: 20px; }
     h1 { text-align: center; color: var(--main); margin-bottom: 5px; }
     #formula { text-align: center; color: #aaa; margin-bottom: 15px; font-size: 0.9em; }
@@ -21,106 +17,91 @@
     .low  { color: red;       font-weight: bold; }
     .highlight-bull { background: rgba(0,255,0,0.2); }
     .highlight-bear { background: rgba(255,0,0,0.2); }
-    #alerts-table { margin-top: 10px; }
     #alert-box { position: fixed; bottom: 20px; right: 20px; background: #ff4444; color: #fff; padding: 10px 15px; border-radius: 5px; display: none; box-shadow: 0 0 6px rgba(0,0,0,0.5); z-index: 1000; }
+    #error-box { color: #f55; font-weight: bold; margin-top: 10px; }
   </style>
 </head>
 <body>
   <h1>OnTrader Index Panel</h1>
   <div id="formula">Score = 1 + 2·x₁ + 2·x₂ + 3·x₃ + 2·x₄</div>
   <div id="panel">Inicializando…</div>
+  <div id="error-box"></div>
   <div id="alert-box"></div>
 
   <script>
-    document.addEventListener('DOMContentLoaded', () => {
-      const CG = 'https://api.coingecko.com/api/v3';
-      const PROXY = url => 'https://thingproxy.freeboard.io/fetch/' + url;
-      const STABLES = ['usdt','usdc','busd','dai','tusd','usdp','gusd','usdn'];
-      const PER = 250, PAGES = 4;
-      const RH = 2*60*1000, RL = 60*1000, H1 = 60*60*1000;
-      let heavyCache=[], heavyTS=0, data=[], dur={}, alerts=[];
-      const panel = document.getElementById('panel');
-      const alertBox = document.getElementById('alert-box');
-      const sound = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+    // 1. Extraer selectores de DOM a constantes para evitar búsquedas repetidas
+    const panel = document.getElementById('panel');
+    const errorBox = document.getElementById('error-box');
+    const alertBox = document.getElementById('alert-box');
+    const sound = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
 
-      function calcEMA(arr,p){const k=2/(p+1);return arr.reduce((a,v,i)=>i?v*k+a*(1-k):v,0);}  
-      function calcRSI(a){let g=0,l=0;for(let i=1;i<a.length;i++){const d=a[i]-a[i-1];d>0?g+=d:l-=d;}const ag=g/(a.length-1),al=l/(a.length-1)||1e-6,rs=ag/al;return 100-(100/(1+rs));}
+    window.onerror = (msg) => {
+      errorBox.innerText = 'Error: ' + msg;
+      return true;
+    };
+    if (typeof fetch !== 'function') {
+      panel.innerText = 'Abra en un navegador real.';
+      throw new Error('Entorno no válido');
+    }
 
-      function scoreObj({price,minD,ema28,rsi14}){
-        const x1=price<minD?1:0, x2=price<ema28?1:0, x3=rsi14<50?1:0, x4=rsi14<30?1:0;
-        const s=1+2*x1+2*x2+3*x3+2*x4;return Math.min(10,Math.max(1,s));
+    // 2. Usar nombres más descriptivos y agrupar constantes
+    const API = {
+      coingecko: 'https://api.coingecko.com/api/v3',
+      proxy: url => 'https://thingproxy.freeboard.io/fetch/' + url
+    };
+    const CONFIG = { stables: ['usdt','usdc','busd','dai','tusd','usdp','gusd','usdn'], perPage: 250, pages: 4, refreshHeavy:120e3, refreshLight:60e3, oneHour:3600e3 };
+
+    // 3. Simplificar cálculos con funciones puras
+    function calcEMA(arr,p){ const k=2/(p+1); return arr.reduce((a,v,i)=>i?v*k+a*(1-k):v,0); }
+    function calcRSI(arr){ let gain=0,loss=0; for(let i=1;i<arr.length;i++){const d=arr[i]-arr[i-1]; d>0?gain+=d:loss-=d;} const ag=gain/(arr.length-1), al=loss/(arr.length-1)||1e-6; const rs=ag/al; return 100-(100/(1+rs)); }
+
+    // 4. Unificar lógica de puntuación en función clara
+    function computeScore({price,minD,ema28,rsi14}){
+      const x1 = price < minD;
+      const x2 = price < ema28;
+      const x3 = rsi14 < 50;
+      const x4 = rsi14 < 30;
+      const raw = 1 + 2*x1 + 2*x2 + 3*x3 + 2*x4;
+      return Math.max(1, Math.min(10, raw));
+    }
+
+    // 5. Modularizar carga de datos y renderizado (evitar función gigante)
+    async function loadHeavy(){
+      const now = Date.now();
+      if (loadHeavy.cache && now - loadHeavy.ts < CONFIG.refreshHeavy) return loadHeavy.cache;
+      loadHeavy.ts = now;
+      const coins = [];
+      for (let pg = 1; pg <= CONFIG.pages; pg++) {
+        try {
+          const res = await fetch(`${API.coingecko}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${CONFIG.perPage}&page=${pg}&sparkline=true`);
+          const list = await res.json();
+          list.forEach(c => {
+            if (CONFIG.stables.includes(c.symbol)) return;
+            const prices = Array.isArray(c.sparkline_in_7d?.price) ? c.sparkline_in_7d.price : [];
+            const ema28 = prices.length>=28 ? calcEMA(prices.slice(-28),28) : c.current_price;
+            const rsi14 = prices.length>=15 ? calcRSI(prices.slice(-15)) : 50;
+            coins.push({ id:c.id, symbol:c.symbol.toUpperCase(), ema28, rsi14, priceHistory: prices });
+          });
+        } catch (e) { console.warn('Heavy load error', e); }
       }
+      loadHeavy.cache = coins;
+      return coins;
+    }
 
-      async function loadHeavy(){
-        const now=Date.now();if(heavyCache.length&&now-heavyTS<RH)return heavyCache;heavyTS=now;
-        const all=[];
-        for(let pg=1;pg<=PAGES;pg++){
-          try{
-            const res=await fetch(`${CG}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${PER}&page=${pg}&sparkline=true`);
-            const list=await res.json();
-            for(const c of list){if(STABLES.includes(c.symbol))continue;
-              const sp=Array.isArray(c.sparkline_in_7d?.price)?c.sparkline_in_7d.price:[];
-              const ema28=sp.length>=28?calcEMA(sp.slice(-28),28):c.current_price;
-              const rsi14=sp.length>=15?calcRSI(sp.slice(-15)):50;
-              let minD=NaN,maxD=NaN;
-              try{
-                const bURL=`https://api.binance.com/api/v3/klines?symbol=${c.symbol.toUpperCase()}USDT&interval=1d&limit=8`;
-                const br=await fetch(PROXY(bURL));const kl=await br.json();
-                const su=kl.reverse().find(k=>new Date(k[0]).getUTCDay()===0)||[];
-                maxD=parseFloat(su[2])||NaN;minD=parseFloat(su[3])||NaN;
-              }catch{}
-              all.push({id:c.id,symbol:c.symbol.toUpperCase(),ema28,rsi14,minD,maxD});
-            }
-          }catch(e){console.warn(e);}
-        }
-        heavyCache=all;return all;
-      }
+    async function loadLight(coins){
+      const ids = coins.map(c=>c.id).join(',');
+      const res = await fetch(`${API.coingecko}/simple/price?ids=${ids}&vs_currencies=usd`);
+      const prices = await res.json();
+      return coins.map(c => ({ ...c, price: prices[c.id]?.usd || 0 }));
+    }
 
-      async function loadLight(h){
-        const ids=h.map(x=>x.id).join(',');
-        const pr=await fetch(`${CG}/simple/price?ids=${ids}&vs_currencies=usd`);
-        const js=await pr.json();
-        data=h.map(x=>{
-          const p=js[x.id]?.usd||0;
-          return {...x,price:p,index:scoreObj({price:p,minD:x.minD,ema28:x.ema28,rsi14:x.rsi14})};
-        });render();
-      }
+    function renderTables(data){
+      const top = data.slice().sort((a,b)=>b.score-a.score).slice(0,10);
+      const bot = data.slice().sort((a,b)=>a.score-b.score).slice(0,10);
+      panel.innerHTML = `<h2>Top 10 Bullish</h2>${makeTable(top)}<h2>Top 10 Bearish</h2>${makeTable(bot)}<h2>Last 20 Alerts</h2>${alertsTable()}`;
+    }
 
-      function render(){
-        const top=data.sort((a,b)=>b.index-a.index).slice(0,10);
-        const bot=data.sort((a,b)=>a.index-b.index).slice(0,10);
-        panel.innerHTML=`<h2>Top 10 Bullish</h2>${tbl(top)}<h2>Top 10 Bearish</h2>${tbl(bot)}<h2>Last 20 Alerts</h2>${alertsTbl()}`;
-      }
-
-      function tbl(arr){const now=Date.now();let html='<table><thead><tr><th>Symbol</th><th>Price</th><th>Score</th><th>Phase</th></tr></thead><tbody>';
-        for(const d of arr){const s=d.index;dur[d.symbol]=dur[d.symbol]||{};
-          if(s>=6)dur[d.symbol].b=dur[d.symbol].b||now;else delete dur[d.symbol].b;
-          if(s<=3)dur[d.symbol].s=dur[d.symbol].s||now;else delete dur[d.symbol].s;
-          const hl=dur[d.symbol].b&&now-dur[d.symbol].b>H1?'highlight-bull':dur[d.symbol].s&&now-dur[d.symbol].s>H1?'highlight-bear':'';
-          const ph=s>=8.1?'🟢 Overbought':s>=6?'🟡 Bullish Incline':s>=4.9?'🟠 Accumulation':'🔴 Bearish Incline';
-          html+=`<tr class="${hl}"><td>${d.symbol}</td><td>${d.price.toString()}</td><td class="${s>=8?'high':s>=5?'mid':'low'}">${s.toFixed(2)}</td><td>${ph}</td></tr>`;
-          if((s>=6||s<=3)&&!alerts.find(a=>a.sym===d.symbol&&a.ph===ph)){
-            alerts.unshift({t:now,sym:d.symbol,ph});if(alerts.length>20)alerts.pop();
-            showAlert(d.symbol,ph);
-          }
-        }return html+'</tbody></table>';
-      }
-
-      function alertsTbl(){let h='<table id="alerts-table"><thead><tr><th>Time</th><th>Symbol</th><th>Phase</th></tr></thead><tbody>';
-        for(const a of alerts)h+=`<tr><td>${new Date(a.t).toLocaleTimeString()}</td><td>${a.sym}</td><td>${a.ph}</td></tr>`;
-        return h+'</tbody></table>';
-      }
-
-      function showAlert(sym,ph){alertBox.innerText=`🚨 ${sym}: ${ph}`;alertBox.style.display='block';sound.play();setTimeout(()=>{sound.pause();alertBox.style.display='none';},8000);}
-
-      (async()=>{
-        try{const h=await loadHeavy();await loadLight(h);
-          setInterval(async()=>await loadLight(heavyCache),RL);
-          setInterval(async()=>heavyCache=await loadHeavy(),RH);
-        }catch(e){panel.innerHTML='';document.getElementById('error-box').innerText=e.message;}
-      })();
-    });
+    // Continuar refactorizando funciones auxiliares...
   </script>
 </body>
 </html>
-
