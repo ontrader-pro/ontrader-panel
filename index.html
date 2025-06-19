@@ -2,107 +2,185 @@
 <html lang="es">
 <head>
   <meta charset="utf-8">
-  <title>OnTrader Index Panel Debug</title>
+  <title>OnTrader Futuros Panel</title>
   <style>
-    body { background:#101729; color:#fff; font-family:sans-serif; }
-    #logs { background:#181e34; max-width:800px; margin:10px auto; padding:10px; min-height:100px; font-size:0.97em;}
-    .err { color:#ff6666; }
-    #panel { max-width:900px; margin:20px auto; }
-    table { width:100%; border-collapse:collapse; }
-    th, td { border:1px solid #2c344e; padding:7px; text-align:center; }
-    thead { background:#1f2a44; color:#25f0ff;}
+    body { background: #101729; color: #fff; font-family: 'Segoe UI',sans-serif; margin: 0; }
+    h1 { color: #25f0ff; text-align: center; }
+    #panel { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    .loading { text-align: center; color: #999; padding: 40px; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th, td { border: 1px solid #2c344b; padding: 7px 5px; text-align: center; }
+    th { background: #1a2233; color: #25f0ff; }
+    .bull { color: #36f076; }
+    .bear { color: #ff4f60; }
+    .alert { background: #232f2f; }
+    #error-box { color: #ff6666; text-align: center; }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
-  <h1>Debug Binance Futures Panel</h1>
-  <div id="logs"></div>
-  <div id="panel"></div>
-<script>
-const API_BIN = 'https://fapi.binance.com';
-const PROXY = 'https://api.allorigins.win/raw?url=';
-const MAX_SYMBOLS = 10; // para test
+  <h1>OnTrader Panel - Binance Futuros</h1>
+  <div id="error-box"></div>
+  <div id="panel"><div class="loading">Cargando top 100 símbolos de futuros...</div></div>
+  <script>
+  // === CONFIGURACIÓN ===
+  const API_BIN = "https://fapi.binance.com";
+  const ALLORIGINS = url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+  const STABLES = /USDT$|USDC$|BUSD$|TUSD$|DAI$|USDP$|GUSD$|USDN$|EUR$|FDUSD$/;
+  const REFRESH_INTERVAL = 120000; // 2 min
+  const MAX_SYMBOLS = 100;
+  let scorePrevMap = JSON.parse(localStorage.getItem('ontrader_scores')||'{}');
+  let lastAlerts = JSON.parse(localStorage.getItem('ontrader_alerts')||'[]');
+  let errorBox = document.getElementById('error-box');
+  let panel = document.getElementById('panel');
+  let symbolsCache = [];
 
-function log(msg, err) {
-  document.getElementById('logs').innerHTML += `<div${err?' class="err"':''}>${msg}</div>`;
-}
-function fetchProxy(url) {
-  return fetch(PROXY + encodeURIComponent(url)).then(r => r.json());
-}
-
-async function getTopSymbols() {
-  let tickers = await fetchProxy(API_BIN+'/fapi/v1/ticker/24hr');
-  return tickers
-    .filter(x=>!x.symbol.match(/USDT$|USDC$|BUSD$|TUSD$|DAI$|USDP$|GUSD$|USDN$|EUR$|FDUSD$/))
-    .sort((a,b)=>b.quoteVolume-a.quoteVolume)
-    .slice(0,MAX_SYMBOLS)
-    .map(x=>({symbol:x.symbol, lastPrice:+x.lastPrice}));
-}
-async function getOHLC(symbol, interval, limit) {
-  let url = `${API_BIN}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  let arr = await fetchProxy(url);
-  return arr.map(row=>+row[4]); // close
-}
-function ema(arr, p){let k=2/(p+1),e=arr[0];for(let i=1;i<arr.length;i++)e=arr[i]*k+e*(1-k);return e;}
-function rsi(arr,p=14){let g=0,l=0;for(let i=1;i<arr.length;i++){let d=arr[i]-arr[i-1];d>0?g+=d:l-=d;}let ag=g/p,al=l/p||1e-8,rs=ag/al;return 100-100/(1+rs);}
-function phaseText(score){if(score<=3)return'🔴 Oversold';if(score<4.9)return'🔴 Bearish Incline';if(score<6)return'🟠 Accumulation';if(score<8.1)return'🟡 Bullish Incline';return'🟢 Overbought';}
-
-async function main() {
-  log("Cargando top 10 símbolos de futuros...");
-  let symbols = await getTopSymbols();
-  let rows = [];
-  for(let s of symbols) {
+  // === OBTENER DATA DE BINANCE FUTUROS CON PROXY Y MANEJO DE ESTRUCTURA ===
+  async function fetchProxy(url) {
     try {
-      log("Procesando "+s.symbol+"...");
-      let ohlcvD = await fetchProxy(`${API_BIN}/fapi/v1/klines?symbol=${s.symbol}&interval=1d&limit=40`);
-      let ohlcv15 = await getOHLC(s.symbol,'15m',30);
-      let ohlcv5 = await getOHLC(s.symbol,'5m',30);
-      let ohlcv4 = await getOHLC(s.symbol,'4m',30);
-      // Domingo min/max (igual a antes)
-      let sundays = ohlcvD.filter(row=>{
-        let ts=+row[0];
-        let day=new Date(ts).getUTCDay();
-        return day===0;
-      });
-      let closes = sundays.map(row=>+row[4]);
-      let minSunday = Math.min(...closes), maxSunday = Math.max(...closes);
-      let ema15 = ema(ohlcv15.slice(-28),28);
-      let rsi15 = rsi(ohlcv15.slice(-15),14);
-      let ema5 = ema(ohlcv5.slice(-28),28);
-      let rsi5 = rsi(ohlcv5.slice(-14),14);
-      let rsi4 = rsi(ohlcv4.slice(-14),14);
-      // Score
-      let score = 1;
-      if(s.lastPrice > minSunday) score+=3;
-      if(s.lastPrice > maxSunday) score+=2;
-      if(rsi15>50 && s.lastPrice>ema15) score+=2;
-      if(rsi15<50 && s.lastPrice<ema15) score-=2;
-      if(rsi5>70 && s.lastPrice>ema5) score+=1;
-      if(rsi5<30 && s.lastPrice<ema5) score-=1;
-      if(rsi4<15) score+=0.5;
-      if(rsi4>85) score-=0.5;
-      score=Math.max(1,Math.min(10,score));
-      let phase = phaseText(score);
-      rows.push({symbol:s.symbol, lastPrice:s.lastPrice, score, phase});
+      let resp = await fetch(ALLORIGINS(url));
+      let data = await resp.json();
+      // Algunos proxys devuelven { contents: "...json..." }
+      if (data && data.contents) data = JSON.parse(data.contents);
+      return data;
     } catch(e) {
-      log("Error en "+s.symbol+": "+e.message,true);
+      errorBox.textContent = "Fallo global: " + e.message;
+      throw e;
     }
   }
-  // Render
-  document.getElementById('panel').innerHTML = `<table>
-    <thead><tr><th>Symbol</th><th>Last Price</th><th>Score</th><th>Phase</th></tr></thead>
-    <tbody>
-      ${rows.map(r=>`<tr>
-        <td>${r.symbol}</td>
-        <td>${r.lastPrice}</td>
-        <td>${r.score}</td>
-        <td>${r.phase}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>`;
-  log("¡Listo!");
-}
 
-main().catch(e=>log("Fallo global: "+e.message,true));
-</script>
+  // === FUNCIONES DE ANÁLISIS (dummy, reemplazar con tu lógica real) ===
+  function getFakePhase(score) {
+    if (score >= 8.1) return '🟢 Overbought';
+    if (score >= 6.0) return '🟡 Bullish Incline';
+    if (score >= 4.9) return '🟠 Accumulation';
+    if (score >= 3.1) return '🔴 Bearish Incline';
+    return '🔴 Oversold';
+  }
+  // Este score es ficticio: deberás colocar la fórmula real según tus reglas.
+  function getFakeScore(symObj, prevScore=5) {
+    // Puedes aquí usar tu fórmula según precio, EMA, RSI, etc.
+    // Esto es demo: random pero similar a score anterior.
+    let delta = (Math.random()-0.5)*1.8;
+    let sc = prevScore + delta;
+    if (sc > 10) sc = 10; if (sc < 1) sc = 1;
+    return Math.round(sc*100)/100;
+  }
+
+  // === REFRESH PRINCIPAL ===
+  async function loadAll() {
+    panel.innerHTML = '<div class="loading">Cargando top 100 símbolos de futuros...</div>';
+    errorBox.textContent = '';
+    let tickers;
+    try {
+      tickers = await fetchProxy(API_BIN + "/fapi/v1/ticker/24hr");
+      // Algunos proxys devuelven { contents: "[...array...]" }
+      if (tickers && tickers.contents) tickers = JSON.parse(tickers.contents);
+      if (!Array.isArray(tickers)) throw new Error("tickers.filter is not a function");
+    } catch (e) {
+      panel.innerHTML = '';
+      errorBox.textContent = 'Error cargando datos: ' + e.message;
+      return;
+    }
+    // Filtrar top 100 sin stablecoins
+    let onlyFutures = tickers.filter(x=>!x.symbol.match(STABLES));
+    onlyFutures = onlyFutures.sort((a,b)=>b.quoteVolume-a.quoteVolume).slice(0,MAX_SYMBOLS);
+
+    // Armar lista de símbolos y calcular score actual y score anterior
+    let symbols = onlyFutures.map(obj=>{
+      let prevScore = scorePrevMap[obj.symbol] || 5;
+      let score = getFakeScore(obj, prevScore);
+      let phase = getFakePhase(score);
+      return {
+        symbol: obj.symbol,
+        lastPrice: Number(obj.lastPrice),
+        score,
+        prevScore,
+        phase,
+        // columnas ocultas: podrías añadir aquí para debug
+        raw: obj,
+      };
+    });
+
+    // Registrar los scores actuales para comparar la próxima vez
+    symbols.forEach(d=>{ scorePrevMap[d.symbol]=d.score; });
+    localStorage.setItem('ontrader_scores', JSON.stringify(scorePrevMap));
+
+    // --- ALERTAS: score pasa de una fase a otra
+    symbols.forEach(d=>{
+      let alert = null;
+      if (Math.abs(d.score - d.prevScore) >= 1) { // cambio relevante
+        let dir = d.score > d.prevScore ? "sube" : "baja";
+        alert = {
+          time: Date.now(),
+          symbol: d.symbol,
+          score: d.score,
+          prevScore: d.prevScore,
+          phase: d.phase,
+          direction: dir,
+        };
+      }
+      if (alert) lastAlerts.unshift(alert);
+    });
+    lastAlerts = lastAlerts.slice(0,20); // sólo 20 últimas
+    localStorage.setItem('ontrader_alerts', JSON.stringify(lastAlerts));
+
+    // --- Mostrar top alcista y bajista
+    let bull = [...symbols].sort((a,b)=>b.score-a.score).slice(0,10);
+    let bear = [...symbols].sort((a,b)=>a.score-b.score).slice(0,10);
+
+    // --- Top cambios de score prev a score al alza/baja
+    let up = [...symbols].filter(x=>x.score>x.prevScore).sort((a,b)=>(b.score-b.prevScore)-(a.score-a.prevScore)).slice(0,10);
+    let down = [...symbols].filter(x=>x.score<x.prevScore).sort((a,b)=>(a.score-a.prevScore)-(b.score-b.prevScore)).slice(0,10);
+
+    // --- Render tablas
+    let mkTable = arr => `<table><thead>
+      <tr><th>Símbolo</th><th>Precio</th><th>Fase</th><th>Score</th><th>Score prev</th></tr>
+      </thead><tbody>` +
+      arr.map(d=>`<tr>
+        <td>${d.symbol}</td>
+        <td>${d.lastPrice.toFixed(6)}</td>
+        <td>${d.phase}</td>
+        <td>${d.score.toFixed(2)}</td>
+        <td>${d.prevScore.toFixed(2)}</td>
+      </tr>`).join('') + '</tbody></table>';
+
+    let mkAlerts = arr => `<table><thead>
+      <tr><th>Hora</th><th>Símbolo</th><th>Fase</th><th>Score</th><th>Score prev</th><th>Dirección</th></tr>
+      </thead><tbody>` +
+      arr.map(a=>`<tr class="alert">
+        <td>${new Date(a.time).toLocaleTimeString()}</td>
+        <td>${a.symbol}</td>
+        <td>${a.phase}</td>
+        <td>${a.score.toFixed(2)}</td>
+        <td>${a.prevScore.toFixed(2)}</td>
+        <td>${a.direction}</td>
+      </tr>`).join('') + '</tbody></table>';
+
+    // Render principal
+    panel.innerHTML = `
+      <h2>Top 10 Alcista</h2>
+      ${mkTable(bull)}
+      <h2>Top 10 Bajista</h2>
+      ${mkTable(bear)}
+      <h2>Últimas 20 Alertas</h2>
+      ${mkAlerts(lastAlerts)}
+      <h2>Top 10 Cambios Score al Alza</h2>
+      ${mkTable(up)}
+      <h2>Top 10 Cambios Score a la Baja</h2>
+      ${mkTable(down)}
+      <div style="color:#888;font-size:11px;padding:10px;">Actualizado: ${new Date().toLocaleTimeString()} - Demo</div>
+    `;
+
+    // Para debug
+    console.log('symbols', symbols);
+    console.log('lastAlerts', lastAlerts);
+  }
+
+  // Lanzar y refrescar periódicamente
+  loadAll();
+  setInterval(loadAll, REFRESH_INTERVAL);
+
+  </script>
 </body>
 </html>
