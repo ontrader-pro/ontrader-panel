@@ -5,18 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OnTrader Index Panel</title>
   <style>
-    :root { --main: #25f0ff; --bg: #101729; }
+    :root { --main: #25f0ff; --bg: #101729; --bull: rgba(0,255,0,0.2); --bear: rgba(255,0,0,0.2); }
     body { background: var(--bg); color: #fff; font-family: sans-serif; margin: 0; padding: 20px; }
     h1 { text-align: center; color: var(--main); }
     #formula { text-align: center; color: #aaa; margin-bottom: 15px; font-size: 0.9em; }
+    #panel { position: relative; }
+    .loading { text-align: center; padding: 50px; font-size: 1.2em; color: #888; }
     table { width: 100%; border-collapse: collapse; margin: 20px 0; }
     th, td { border: 1px solid #333; padding: 6px; text-align: center; }
     thead { background: #1f2a44; color: var(--main); }
-    .high { color: limegreen; font-weight: bold; }
-    .mid  { color: orange;    font-weight: bold; }
-    .low  { color: red;       font-weight: bold; }
-    .highlight-bull { background: rgba(0,255,0,0.2); }
-    .highlight-bear { background: rgba(255,0,0,0.2); }
+    .high { color: limegreen; }
+    .mid  { color: orange; }
+    .low  { color: red; }
+    .highlight-bull { background: var(--bull); }
+    .highlight-bear { background: var(--bear); }
     #alert-box { position: fixed; bottom:20px; right:20px; background:#ff4444; color:#fff; padding:10px 15px; border-radius:5px; display:none; }
     #error-box { color:#f55; text-align:center; margin-top:10px; }
   </style>
@@ -24,7 +26,7 @@
 <body>
   <h1>OnTrader Index Panel</h1>
   <div id="formula">Score = 1 + 2·x₁ + 2·x₂ + 3·x₃ + 2·x₄</div>
-  <div id="panel">Cargando datos…</div>
+  <div id="panel"><div class="loading">Cargando datos…</div></div>
   <div id="error-box"></div>
   <div id="alert-box"></div>
 
@@ -36,33 +38,48 @@
 
     window.onerror = msg => { errorBox.innerText = 'Error: ' + msg; return true; };
 
+    const PROXY = url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
     const API = 'https://api.coingecko.com/api/v3';
-    const CONFIG = { stables:['usdt','usdc','busd','dai','tusd','usdp','gusd','usdn'], perPage:250, pages:4, heavyInterval:120e3, refreshInterval:60e3, oneHour:3600e3 };
+    const CONFIG = {
+      stables: new Set(['USDT','USDC','BUSD','DAI','TUSD','USDP','GUSD','USDN']),
+      perPage: 250, pages: 1,
+      refreshInterval: 120e3, oneHour: 3600e3
+    };
 
-    function calcEMA(arr,p){ const k=2/(p+1); return arr.reduce((a,v,i)=>i?v*k+a*(1-k):v,0); }
-    function calcRSI(a){ let g=0,l=0; for(let i=1;i<a.length;i++){const d=a[i]-a[i-1]; d>0?g+=d:l-=d;} const ag=g/(a.length-1), al=l/(a.length-1)||1e-6; return 100-(100/(1+ag/al)); }
-    function computeScore({price,minD,ema28,rsi14}){ const x1=price<minD, x2=price<ema28, x3=rsi14<50, x4=rsi14<30; const raw=1+2*x1+2*x2+3*x3+2*x4; return Math.min(10,Math.max(1,raw)); }
+    function calcEMA(arr,p){const k=2/(p+1);return arr.reduce((a,v,i)=>i?v*k+a*(1-k):v,0);}  
+    function calcRSI(arr){let g=0,l=0;for(let i=1;i<arr.length;i++){const d=arr[i]-arr[i-1];d>0?g+=d:l-=d;}const ag=g/(arr.length-1),al=l/(arr.length-1)||1e-6,rs=ag/al;return 100-(100/(1+rs));}
+
+    function computeScore({price,minD,ema28,rsi14}){
+      const x1=price<minD, x2=price<ema28, x3=rsi14<50, x4=rsi14<30;
+      const raw=1+2*x1+2*x2+3*x3+2*x4;return Math.min(10,Math.max(1,raw));
+    }
 
     let cache=[], durations={}, alerts=[];
 
     async function loadData(){
-      try {
-        const all=[];
-        for(let pg=1; pg<=CONFIG.pages; pg++){
-          const url=`${API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${CONFIG.perPage}&page=${pg}&sparkline=true&price_change_percentage=1h`;
-          const res=await fetch(url);
-          const list=await res.json();
-          list.forEach(c=>{
-            if(CONFIG.stables.includes(c.symbol)) return;
-            const sp=Array.isArray(c.sparkline_in_7d?.price)?c.sparkline_in_7d.price:[];
-            const ema28=sp.length>=28?calcEMA(sp.slice(-28),28):c.current_price;
-            const rsi14=sp.length>=15?calcRSI(sp.slice(-15)):50;
-            all.push({ symbol:c.symbol.toUpperCase(), price:c.current_price, ema28, rsi14, minD:c.low_24h });
+      panel.innerHTML='<div class="loading">Cargando datos…</div>';
+      errorBox.innerText='';
+      try{
+        const pages=[...Array(CONFIG.pages).keys()].map(i=>i+1);
+        const results=await Promise.all(pages.map(async page=>{
+          const url=`${API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${CONFIG.perPage}&page=${page}&sparkline=true`;
+          const res=await fetch(PROXY(url));
+          if(!res.ok) throw new Error('API error ' + res.status);
+          return res.json();
+        }));
+        const list=[].concat(...results);
+        cache=list.filter(c=>!CONFIG.stables.has(c.symbol.toUpperCase()))
+          .map(c=>{
+            const prices=Array.isArray(c.sparkline_in_7d?.price)?c.sparkline_in_7d.price:[];
+            return {
+              symbol:c.symbol.toUpperCase(), price:c.current_price,
+              minD:c.low_24h,
+              ema28:prices.length>=28?calcEMA(prices.slice(-28),28):c.current_price,
+              rsi14:prices.length>=15?calcRSI(prices.slice(-15)):50
+            };
           });
-        }
-        cache=all;
         processAndRender();
-      } catch(e){ errorBox.innerText=e.message; }
+      }catch(e){panel.innerHTML=''; errorBox.innerText=e.message;}
     }
 
     function processAndRender(){
@@ -70,15 +87,15 @@
       cache.forEach(d=>{
         d.score=computeScore(d);
         durations[d.symbol]=durations[d.symbol]||{};
-        if(d.score>=6) durations[d.symbol].b=durations[d.symbol].b||now; else delete durations[d.symbol].b;
-        if(d.score<=3) durations[d.symbol].s=durations[d.symbol].s||now; else delete durations[d.symbol].s;
-        const phase=d.score>=8.1?'🟢 Overbought':d.score>=6?'🟡 Bullish Incline':d.score>=4.9?'🟠 Accumulation':'🔴 Bearish Incline';
+        if(d.score>=6) durations[d.symbol].bull=durations[d.symbol].bull||now; else delete durations[d.symbol].bull;
+        if(d.score<=3) durations[d.symbol].bear=durations[d.symbol].bear||now; else delete durations[d.symbol].bear;
+        const phase=phaseText(d.score);
         if((d.score>=6||d.score<=3)&&!alerts.find(a=>a.symbol===d.symbol&&a.phase===phase)){
           alerts.unshift({time:now,symbol:d.symbol,phase}); if(alerts.length>20)alerts.pop(); showAlert(d.symbol,phase);
         }
       });
-      const top=cache.sort((a,b)=>b.score-a.score).slice(0,10);
-      const bot=cache.sort((a,b)=>a.score-b.score).slice(0,10);
+      const sorted=cache.slice().sort((a,b)=>b.score-a.score);
+      const top=sorted.slice(0,10), bot=sorted.slice(-10).reverse();
       panel.innerHTML=
         `<h2>Top 10 Bullish</h2>${makeTable(top)}`+
         `<h2>Top 10 Bearish</h2>${makeTable(bot)}`+
@@ -89,20 +106,32 @@
       let html='<table><thead><tr><th>Symbol</th><th>Price</th><th>Score</th><th>Phase</th></tr></thead><tbody>';
       const now=Date.now();
       arr.forEach(d=>{
-        const s=d.score.toFixed(2);
+        const s=d.score, t=s.toFixed(2);
         const cls=s>=8?'high':s>=5?'mid':'low';
-        const hl=durations[d.symbol].b&&now-durations[d.symbol].b>CONFIG.oneHour?'highlight-bull':durations[d.symbol].s&&now-durations[d.symbol].s>CONFIG.oneHour?'highlight-bear':'';
-        html+=`<tr class="${hl}"><td>${d.symbol}</td><td>${d.price.toString()}</td><td class="${cls}">${s}</td><td>${phaseText(s)}</td></tr>`;
+        const hl=durations[d.symbol].bull&&now-durations[d.symbol].bull>CONFIG.oneHour?'highlight-bull':durations[d.symbol].bear&&now-durations[d.symbol].bear>CONFIG.oneHour?'highlight-bear':'';
+        html+=`<tr class="${hl}"><td>${d.symbol}</td><td>${d.price.toFixed(6)}</td><td class="${cls}">${t}</td><td>${phaseText(s)}</td></tr>`;
       });
       return html+'</tbody></table>';
     }
 
     function phaseText(s){return s>=8.1?'🟢 Overbought':s>=6?'🟡 Bullish Incline':s>=4.9?'🟠 Accumulation':'🔴 Bearish Incline';}
-    function alertsTable(){let h='<table><thead><tr><th>Time</th><th>Symbol</th><th>Phase</th></tr></thead><tbody>';alerts.forEach(a=>h+=`<tr><td>${new Date(a.time).toLocaleTimeString()}</td><td>${a.symbol}</td><td>${a.phase}</td></tr>`);return h+'</tbody></table>';}    
-    function showAlert(sym,ph){alertBox.innerText=`🚨 ${sym}: ${ph}`;alertBox.style.display='block';try{sound.currentTime=0;sound.play();}catch{}setTimeout(()=>{sound.pause();alertBox.style.display='none';},8000);}    
+
+    function alertsTable(){let html='<table><thead><tr><th>Time</th><th>Symbol</th><th>Phase</th></tr></thead><tbody>';
+      alerts.forEach(a=>html+=`<tr><td>${new Date(a.time).toLocaleTimeString()}</td><td>${a.symbol}</td><td>${a.phase}</td></tr>`);
+      return html+'</tbody></table>';
+    }
+
+    let alertTimeout;
+    function showAlert(sym,ph){
+      alertBox.innerText=`🚨 ${sym}: ${ph}`;
+      alertBox.style.display='block';
+      try{sound.currentTime=0; sound.play();}catch{}
+      clearTimeout(alertTimeout);
+      alertTimeout=setTimeout(()=>{sound.pause(); alertBox.style.display='none';},8000);
+    }
 
     loadData();
-    setInterval(loadData, CONFIG.refreshHeavy);
+    setInterval(loadData, CONFIG.refreshInterval);
   </script>
 </body>
 </html>
