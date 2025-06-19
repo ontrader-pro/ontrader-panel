@@ -1,47 +1,134 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Test CoinGecko</title>
+  <title>Índice OnTrader</title>
   <style>
-    body { background:#101729; color:#fff; font-family:sans-serif; padding:20px; }
-    table { width:100%; border-collapse:collapse; margin-top:1em; }
-    th,td { border:1px solid #333; padding:8px; text-align:center; }
-    thead { background:#1f2a44; color:#25f0ff; }
+    body { background:#101729; color:#fff; font-family:sans-serif; margin:0; padding:20px }
+    h1 { text-align:center; color:#25f0ff }
+    #filtros { display:flex; justify-content:center; gap:10px; flex-wrap:wrap; margin:15px 0 }
+    #panel { overflow-x:auto }
+    table { width:100%; border-collapse:collapse }
+    th,td { border:1px solid #333; padding:6px; text-align:center; min-width:80px }
+    thead { background:#1f2a44; color:#25f0ff }
+    .high { color:limegreen; font-weight:bold }
+    .mid  { color:orange;    font-weight:bold }
+    .low  { color:red;       font-weight:bold }
+    #alerta {
+      position:fixed; bottom:20px; right:20px;
+      background:#ff4444; color:#fff;
+      padding:10px 15px; border-radius:5px;
+      display:none; box-shadow:0 0 6px rgba(0,0,0,0.5);
+      z-index:1000;
+    }
   </style>
 </head>
 <body>
-  <h1>Test de Precios CoinGecko</h1>
-  <div id="panel">Cargando…</div>
+  <h1>Índice OnTrader</h1>
+  <div id="filtros">
+    <input id="buscar" placeholder="Buscar cripto…" />
+    <select id="orden">
+      <option value="desc">Mayor Índice</option>
+      <option value="asc">Menor Índice</option>
+    </select>
+  </div>
+  <div id="panel">Cargando datos…</div>
+  <div id="alerta"></div>
 
   <script>
-    // 1) Lista corta de ejemplo
-    const cgIDs = ["bitcoin","ethereum","binancecoin","solana","ripple"];
-    const mapSym = { bitcoin:"BTC", ethereum:"ETH", binancecoin:"BNB", solana:"SOL", ripple:"XRP" };
+  // 250 criptos CoinGecko (por volumen)
+  const URL = 'https://api.coingecko.com/api/v3/coins/markets'
+    + '?vs_currency=usd&order=market_cap_desc&per_page=250&page=1&sparkline=true';
 
-    async function loadPrices(){
-      document.getElementById("panel").innerText = "Cargando datos…";
-      try {
-        const res = await fetch(
-          `https://api.coingecko.com/api/v3/simple/price?ids=${cgIDs.join(",")}&vs_currencies=usd`
-        );
-        const d = await res.json();
-        let html = `<table>
-          <thead><tr><th>Cripto</th><th>Precio (USD)</th></tr></thead><tbody>`;
-        cgIDs.forEach(id => {
-          html += `<tr><td>${mapSym[id]}</td><td>$${d[id].usd.toLocaleString()}</td></tr>`;
-        });
-        html += "</tbody></table>";
-        document.getElementById("panel").innerHTML = html;
-      } catch(e) {
-        document.getElementById("panel").innerText = "Error cargando datos.";
-        console.error(e);
-      }
+  const domingo = {}; // si tienes máximos/mínimos dom. ponlos aquí: domingo["BTC"]= {max:...,min:...}, etc.
+  let dataGlobal = [], alerted = new Set();
+
+  // EMA 28 y RSI 14
+  function calcEMA(vals,p){
+    const k=2/(p+1);
+    return vals.reduce((a,v,i)=>i? v*k + a*(1-k): v, 0);
+  }
+  function calcRSI(arr){
+    let g=0,l=0;
+    for(let i=1;i<arr.length;i++){
+      const d=arr[i]-arr[i-1];
+      if(d>0) g+=d; else l-=d;
     }
+    const avgG=g/(arr.length-1), avgL=l/(arr.length-1)||1e-6, rs=avgG/avgL;
+    return 100-(100/(1+rs));
+  }
 
-    loadPrices();
-    setInterval(loadPrices, 30000);
+  async function actualizar(){
+    document.getElementById('panel').innerText = 'Cargando…';
+    const res = await fetch(URL);
+    const arr = await res.json(); // cada item -> {id,symbol,current_price,sparkline_in_7d:{price:[]}}
+    dataGlobal = arr.map(c=> {
+      const closes = c.sparkline_in_7d.price.slice(-28);
+      const ema = calcEMA(closes,28);
+      const rsi = calcRSI(c.sparkline_in_7d.price.slice(-15));
+      const precio = c.current_price;
+      // Lógica OnTrader oculta (máx/min domingo si tienes):
+      const dom = domingo[c.symbol.toUpperCase()]||{};
+      let score=0;
+      if(dom.min && precio>dom.min) score+=1;
+      if(dom.max && dom.min && precio>(dom.min+dom.max)/2) score+=2;
+      if(dom.max && precio>dom.max) score+=2;
+      if(dom.min && precio<dom.min) score+=2;
+      if((precio%1)<0.2) score+=1;
+      if(precio>ema) score+=2;
+      if(rsi>60||rsi<40) score+=2.5;
+      score = Math.min(10, Math.max(1, score));
+      const alerta = score>=7 ? `🚨 ${c.symbol.toUpperCase()} Índice ${score}` : '-';
+      return {
+        cripto: c.symbol.toUpperCase(),
+        precio,
+        indice: score,
+        alerta
+      };
+    });
+    renderTabla();
+    mostrarAlerta();
+  }
+
+  function renderTabla(){
+    const ord = document.getElementById('orden').value;
+    const bus = document.getElementById('buscar').value.toLowerCase();
+    let arr = dataGlobal.filter(d=>d.cripto.toLowerCase().includes(bus));
+    arr.sort((a,b)=> ord==='desc'? b.indice-a.indice : a.indice-b.indice);
+    let html=`<table><thead>
+      <tr><th>Cripto</th><th>Precio</th><th>Índice</th><th>Alerta</th></tr>
+    </thead><tbody>`;
+    for(let d of arr){
+      const cls = d.indice>=8?'high': d.indice>=5?'mid':'low';
+      html+=`<tr>
+        <td>${d.cripto}</td>
+        <td>${d.precio.toLocaleString()}</td>
+        <td class="${cls}">${d.indice}</td>
+        <td>${d.alerta}</td>
+      </tr>`;
+    }
+    html+=`</tbody></table>`;
+    document.getElementById('panel').innerHTML = html;
+  }
+
+  function mostrarAlerta(){
+    const el = document.getElementById('alerta');
+    const n = dataGlobal.find(d=>d.indice>=7 && !alerted.has(d.cripto));
+    if(n){
+      alerted.add(n.cripto);
+      el.innerText = n.alerta;
+      el.style.display = 'block';
+      new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play();
+      setTimeout(()=> el.style.display='none',10000);
+    }
+  }
+
+  document.getElementById('buscar').addEventListener('input', renderTabla);
+  document.getElementById('orden').addEventListener('change', renderTabla);
+
+  actualizar();
+  setInterval(actualizar,30000);
   </script>
 </body>
 </html>
