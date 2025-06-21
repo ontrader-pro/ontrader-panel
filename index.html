@@ -82,7 +82,7 @@ async function main() {
   document.getElementById('panel').innerHTML = '<div class="loading">Cargando top 50 futuros…</div>';
   document.getElementById('error').textContent = '';
   try {
-    let res = await fetch('https://fapi.binance.com/fapi/v1/ticker/24hr');
+    let res = await fetch('https://binance-proxy-username.vercel.app/api/binance');
     let tickers = await res.json();
     tickers = tickers.filter(t =>
       !STABLES.some(s => t.symbol.endsWith(s) && t.symbol !== "BTCUSDT") &&
