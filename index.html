@@ -83,7 +83,11 @@ async function main() {
   document.getElementById('error').textContent = '';
   try {
     let res = await fetch('https://binance-proxy-ihaub8pjl-ontraders-projects.vercel.app/api/binance');
-    let tickers = await res.json();
+    let proxyResp = await res.json();
+    if (!proxyResp.success || !Array.isArray(proxyResp.data)) {
+      throw new Error(proxyResp.error || "Formato de respuesta del proxy no válido");
+    }
+    let tickers = proxyResp.data;
     tickers = tickers.filter(t =>
       !STABLES.some(s => t.symbol.endsWith(s) && t.symbol !== "BTCUSDT") &&
       t.symbol.endsWith('USDT')
@@ -128,7 +132,6 @@ async function main() {
         if(rsi14 < 45) score-=2;
         if(lastPrice > maxSunday) score+=2;
         if(lastPrice < minSunday) score-=2;
-        // regla: si abajo del min Sunday, nunca más de 5
         if(lastPrice <= minSunday && score>5) score=5;
         score = Math.max(1, Math.min(10, score));
         let phase = getPhase(score);
@@ -171,7 +174,6 @@ async function main() {
     console.error("ERROR GLOBAL:", e);
   }
 }
-// Primera carga y refresco cada 2 minutos
 main();
 setInterval(main, 120000);
 </script>
